@@ -48,13 +48,14 @@ GRADING_PROMPT = """당신은 수학 문제 채점기입니다.
 
 {
   "problems": [
-    {"number": 1, "correct": true,  "box": [x1, y1, x2, y2]},
-    {"number": 2, "correct": false, "box": [x1, y1, x2, y2]}
+    {"number": 1, "correct": true,  "point": [x, y]},
+    {"number": 2, "correct": false, "point": [x, y]}
   ]
 }
 
 규칙:
-- box 는 학생이 쓴 "답"을 감싸는 사각형 좌표입니다. 여기에 O 또는 빗금이 그려집니다.
+- point 는 그 문제의 "좌측 상단"(보통 문제 번호가 있는 위치)의 좌표입니다.
+  여기에 채점 표시(O 또는 빗금)를 그립니다.
 - 좌표는 사진의 왼쪽 위를 (0,0), 오른쪽 아래를 (1000,1000) 으로 하는 0~1000 사이 정수입니다.
   (실제 사진 크기와 상관없이 항상 0~1000 비율로 환산해서 쓰세요.)
 - correct 는 답이 맞으면 true, 틀리면 false 입니다.
@@ -76,35 +77,42 @@ def _extract_json(text: str) -> dict:
 
 
 def _draw_marks(image_bytes: bytes, problems: list) -> bytes:
-    """원본 사진 위에 O(정답) / 빗금(오답)을 그려서 새 사진(바이트)으로 돌려줍니다."""
+    """각 문제의 좌측 상단에 O(정답) / 빗금(오답)을 그려서 새 사진(바이트)으로 돌려줍니다."""
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     width, height = image.size
     draw = ImageDraw.Draw(image)
 
-    # 선 두께는 사진 크기에 비례하게. (너무 얇으면 안 보임)
+    # 표시 크기/두께를 사진 크기에 비례하게 정합니다. (고정 크기 마크)
+    radius = max(12, round(min(width, height) / 22))
     line_width = max(3, round(min(width, height) / 150))
     red = (220, 30, 30)
 
     for item in problems:
-        box = item.get("box")
-        if not box or len(box) != 4:
+        point = item.get("point")
+        if not point or len(point) != 2:
             continue
 
         # 0~1000 비율 좌표를 실제 픽셀 좌표로 환산.
-        x1 = box[0] / 1000 * width
-        y1 = box[1] / 1000 * height
-        x2 = box[2] / 1000 * width
-        y2 = box[3] / 1000 * height
-        # 좌표가 뒤집혀 와도 안전하게 정렬.
-        left, right = sorted((x1, x2))
-        top, bottom = sorted((y1, y2))
+        cx = point[0] / 1000 * width
+        cy = point[1] / 1000 * height
+        # 마크가 사진 밖으로 나가지 않게 살짝 안쪽으로 당겨줍니다.
+        cx = min(max(cx, radius), width - radius)
+        cy = min(max(cy, radius), height - radius)
 
         if item.get("correct"):
-            # 정답 → 빨간 동그라미(타원)
-            draw.ellipse([left, top, right, bottom], outline=red, width=line_width)
+            # 정답 → 빨간 동그라미
+            draw.ellipse(
+                [cx - radius, cy - radius, cx + radius, cy + radius],
+                outline=red,
+                width=line_width,
+            )
         else:
-            # 오답 → 빗금(／). 사각형을 가로지르는 대각선.
-            draw.line([left, bottom, right, top], fill=red, width=line_width)
+            # 오답 → 빗금(／). 마크 영역을 가로지르는 대각선.
+            draw.line(
+                [cx - radius, cy + radius, cx + radius, cy - radius],
+                fill=red,
+                width=line_width,
+            )
 
     out = io.BytesIO()
     image.save(out, format="JPEG")
