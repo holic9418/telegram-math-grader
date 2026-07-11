@@ -1,0 +1,7 @@
+.env
+API key.txt
+*.key
+tetris.html
+__pycache__/
+*.pyc
+.git/
