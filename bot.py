@@ -50,21 +50,35 @@ GRADING_PROMPT = """당신은 수학 문제 채점기입니다.
 
 {
   "problems": [
-    {"number": 1, "correct": true,  "note": "문제 번호가 사진에서 어디 있는지 짧게", "point": [x, y]},
-    {"number": 2, "correct": false, "note": "...", "point": [x, y]}
+    {
+      "number": 1,
+      "problem": "문제 내용을 짧게",
+      "correct_answer": "내가 직접 계산한 정답",
+      "student_answer": "학생이 사진에 쓴 답",
+      "correct": true,
+      "note": "문제 번호가 사진에서 어디 있는지",
+      "point": [x, y]
+    }
   ]
 }
 
-규칙:
-- point 는 그 문제의 "좌측 상단"(보통 문제 번호가 적힌 지점)의 좌표입니다.
-  여기에 채점 표시(O 또는 빗금)를 그립니다.
-- 좌표를 정하기 전에, 먼저 note 에 그 문제 번호가 사진에서 대략 어디 있는지
-  (예: "왼쪽 위", "가운데쯤", "오른쪽 아래") 를 적으세요. 그런 다음 그 위치에 맞는
-  point 를 신중히 정하세요. 문제 번호의 정확한 위치를 꼼꼼히 보고 좌표를 매기세요.
+채점 순서 (반드시 이 순서대로 각 필드를 채우세요):
+1. problem: 문제를 읽고 무슨 문제인지 적습니다.
+2. correct_answer: 그 문제의 정답을 "직접, 단계적으로, 신중히" 계산해서 적습니다.
+   (계산 실수를 하지 않도록 꼼꼼히 확인하세요.)
+3. student_answer: 학생이 사진에 실제로 써놓은 답을 그대로 읽어 적습니다.
+4. correct: correct_answer 와 student_answer 를 비교합니다.
+   - 값이 같으면(예: 1/2 와 0.5 처럼 형태만 다르고 값이 같으면) true.
+   - 값이 다르면 false.
+   - 학생 답을 알아볼 수 없으면 false.
+5. note / point: 그 문제 번호의 좌측 상단 위치를 신중히 보고 좌표를 매깁니다.
+
+좌표 규칙:
+- point 는 그 문제의 "좌측 상단"(보통 문제 번호가 적힌 지점)의 좌표입니다. 여기에 O/빗금이 그려집니다.
 - 좌표는 사진의 왼쪽 위를 (0,0), 오른쪽 아래를 (1000,1000) 으로 하는 0~1000 사이 정수입니다.
   (실제 사진 크기와 상관없이 항상 0~1000 비율로 환산해서 쓰세요.)
-- correct 는 답이 맞으면 true, 틀리면 false 입니다.
-- 답을 알아볼 수 없거나 문제가 하나도 없으면 {"problems": []} 를 출력하세요."""
+
+문제가 하나도 없거나 아무것도 알아볼 수 없으면 {"problems": []} 를 출력하세요."""
 
 
 def _extract_json(text: str) -> dict:
@@ -192,7 +206,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Claude 에게 사진을 보내고, 각 답의 위치 + 정답 여부(JSON)를 받습니다.
     response = claude.messages.create(
         model="claude-opus-4-8",
-        max_tokens=2000,
+        max_tokens=4000,
         system=GRADING_PROMPT,
         messages=[
             {
