@@ -12,7 +12,9 @@
 import base64
 import io
 import json
+import math
 import os
+import random
 
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw
@@ -48,14 +50,17 @@ GRADING_PROMPT = """당신은 수학 문제 채점기입니다.
 
 {
   "problems": [
-    {"number": 1, "correct": true,  "point": [x, y]},
-    {"number": 2, "correct": false, "point": [x, y]}
+    {"number": 1, "correct": true,  "note": "문제 번호가 사진에서 어디 있는지 짧게", "point": [x, y]},
+    {"number": 2, "correct": false, "note": "...", "point": [x, y]}
   ]
 }
 
 규칙:
-- point 는 그 문제의 "좌측 상단"(보통 문제 번호가 있는 위치)의 좌표입니다.
+- point 는 그 문제의 "좌측 상단"(보통 문제 번호가 적힌 지점)의 좌표입니다.
   여기에 채점 표시(O 또는 빗금)를 그립니다.
+- 좌표를 정하기 전에, 먼저 note 에 그 문제 번호가 사진에서 대략 어디 있는지
+  (예: "왼쪽 위", "가운데쯤", "오른쪽 아래") 를 적으세요. 그런 다음 그 위치에 맞는
+  point 를 신중히 정하세요. 문제 번호의 정확한 위치를 꼼꼼히 보고 좌표를 매기세요.
 - 좌표는 사진의 왼쪽 위를 (0,0), 오른쪽 아래를 (1000,1000) 으로 하는 0~1000 사이 정수입니다.
   (실제 사진 크기와 상관없이 항상 0~1000 비율로 환산해서 쓰세요.)
 - correct 는 답이 맞으면 true, 틀리면 false 입니다.
@@ -76,6 +81,47 @@ def _extract_json(text: str) -> dict:
         return {"problems": []}
 
 
+def _draw_hand_circle(draw, cx, cy, radius, color, width) -> None:
+    """사람이 펜으로 쓱 그린 듯한 동그라미. (살짝 삐뚤빼뚤 + 시작/끝이 겹침)"""
+    # 한 바퀴(2π)보다 조금 더 돌려서, 실제 손그림처럼 시작과 끝이 겹치게 합니다.
+    start = random.uniform(-0.5, 0.1)
+    end = start + 2 * math.pi + random.uniform(0.4, 0.9)
+    # 완전한 원이 아니라 살짝 찌그러진 타원 + 약간의 기울기.
+    rx = radius * random.uniform(1.0, 1.18)
+    ry = radius * random.uniform(0.82, 1.0)
+    tilt = random.uniform(-0.35, 0.35)
+    ct, st = math.cos(tilt), math.sin(tilt)
+
+    steps = 64
+    pts = []
+    for i in range(steps + 1):
+        a = start + (end - start) * i / steps
+        wob = 1 + random.uniform(-0.05, 0.05)  # 반지름이 미세하게 흔들림
+        ex, ey = rx * wob * math.cos(a), ry * wob * math.sin(a)
+        x = cx + ex * ct - ey * st
+        y = cy + ex * st + ey * ct
+        pts.append((x, y))
+    draw.line(pts, fill=color, width=width, joint="curve")
+
+
+def _draw_hand_slash(draw, cx, cy, radius, color, width) -> None:
+    """사람이 그은 듯한 빗금(／). 살짝 휘어진 대각선."""
+    x1, y1 = cx - radius, cy + radius
+    x2, y2 = cx + radius, cy - radius
+    # 중간점을 살짝 옆으로 밀어 곡선처럼 보이게 합니다.
+    mx = (x1 + x2) / 2 + random.uniform(-0.15, 0.15) * radius
+    my = (y1 + y2) / 2 + random.uniform(-0.15, 0.15) * radius
+    pts = []
+    steps = 16
+    for i in range(steps + 1):
+        t = i / steps
+        # 2차 베지어 곡선으로 부드럽게.
+        x = (1 - t) ** 2 * x1 + 2 * (1 - t) * t * mx + t ** 2 * x2
+        y = (1 - t) ** 2 * y1 + 2 * (1 - t) * t * my + t ** 2 * y2
+        pts.append((x, y))
+    draw.line(pts, fill=color, width=width, joint="curve")
+
+
 def _draw_marks(image_bytes: bytes, problems: list) -> bytes:
     """각 문제의 좌측 상단에 O(정답) / 빗금(오답)을 그려서 새 사진(바이트)으로 돌려줍니다."""
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -84,7 +130,7 @@ def _draw_marks(image_bytes: bytes, problems: list) -> bytes:
 
     # 표시 크기/두께를 사진 크기에 비례하게 정합니다. (고정 크기 마크)
     radius = max(12, round(min(width, height) / 22))
-    line_width = max(3, round(min(width, height) / 150))
+    line_width = max(3, round(min(width, height) / 130))
     red = (220, 30, 30)
 
     for item in problems:
@@ -100,19 +146,9 @@ def _draw_marks(image_bytes: bytes, problems: list) -> bytes:
         cy = min(max(cy, radius), height - radius)
 
         if item.get("correct"):
-            # 정답 → 빨간 동그라미
-            draw.ellipse(
-                [cx - radius, cy - radius, cx + radius, cy + radius],
-                outline=red,
-                width=line_width,
-            )
+            _draw_hand_circle(draw, cx, cy, radius, red, line_width)
         else:
-            # 오답 → 빗금(／). 마크 영역을 가로지르는 대각선.
-            draw.line(
-                [cx - radius, cy + radius, cx + radius, cy - radius],
-                fill=red,
-                width=line_width,
-            )
+            _draw_hand_slash(draw, cx, cy, radius, red, line_width)
 
     out = io.BytesIO()
     image.save(out, format="JPEG")
@@ -156,7 +192,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Claude 에게 사진을 보내고, 각 답의 위치 + 정답 여부(JSON)를 받습니다.
     response = claude.messages.create(
         model="claude-opus-4-8",
-        max_tokens=1024,
+        max_tokens=2000,
         system=GRADING_PROMPT,
         messages=[
             {
