@@ -2,6 +2,8 @@
 API key.txt
 *.key
 tetris.html
+data/
+*.xlsx
 __pycache__/
 *.pyc
 .git/

@@ -1,266 +1,515 @@
+# -*- coding: utf-8 -*-
 """
-텔레그램 → Claude 봇.
+텔레그램 출석부 봇.
 
-할 수 있는 일:
-  1) 텍스트 메시지를 보내면  → Claude가 답을 해줍니다.
-  2) 수학 문제 사진을 보내면 → Claude가 채점해서, 정답에는 ⭕ 오답에는 빗금(／)을
-                              직접 그려 넣은 사진을 다시 보내줍니다.
+기능:
+  1) 자유 문장으로 출석 입력 → Claude가 해석 → 미리보기 → '확인' 하면 xlsx 기록
+  2) /출석부 [YY.MM]  → 해당(기본: 이번 달) 출석부 파일 전송
+  3) xlsx 파일을 봇에게 보내면 → 저장(시드)
+  4) /일정             → 반별 수업 요일 보기/변경
+  5) /생성             → 이번 달 파일을 지난달에서 새로 생성
+  6) 매월 1일 자동으로 새 달 파일 생성 + 알림
 
-봇 토큰과 API 키는 코드에 직접 넣지 않고 환경변수에서 읽어옵니다.
+토큰/키는 환경변수(.env)에서 읽습니다.
+데이터(출석부 xlsx, 설정)는 DATA_DIR(기본 ./data, Railway는 영구 볼륨)에 저장됩니다.
 """
 
-import base64
-import io
-import json
-import math
 import os
-import random
+import io
+import re
+import json
+import logging
+import datetime
 
 from dotenv import load_dotenv
-from PIL import Image, ImageDraw
-
 import anthropic
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
+    CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
 
-# ── 1. 환경변수에서 비밀 값 읽기 ────────────────────────────────
-# 같은 폴더의 .env 파일을 읽어 환경변수로 불러옵니다.
+import attendance_core as ac
+
+# ── 설정 ───────────────────────────────────────────────────────
 load_dotenv()
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(name)s | %(message)s", level=logging.INFO
+)
+log = logging.getLogger("attendance-bot")
 
-# 코드에 토큰/키를 직접 쓰지 않고, 실행 환경에서 가져옵니다.
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-# ANTHROPIC_API_KEY 는 anthropic 라이브러리가 환경변수에서 자동으로 읽습니다.
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-4-8")
+DATA_DIR = os.environ.get("DATA_DIR", "data")
+os.makedirs(DATA_DIR, exist_ok=True)
 
-# ── 2. Claude 클라이언트 준비 ──────────────────────────────────
-# 인자를 비워두면 환경변수 ANTHROPIC_API_KEY 를 자동으로 사용합니다.
-claude = anthropic.Anthropic()
+claude = anthropic.AsyncAnthropic()
 
-# 사진을 채점할 때 Claude 에게 주는 "역할 설명(시스템 프롬프트)".
-# 여기서는 설명 대신, 각 답의 "위치"와 "정답 여부"만 JSON 으로 받아옵니다.
-# 그 좌표에 우리가 직접 O / 빗금을 그립니다.
-GRADING_PROMPT = """당신은 수학 문제 채점기입니다.
-학생이 손으로 푼 수학 문제 사진을 보고, 각 문제(또는 각 답)마다 채점하세요.
+WD = ["월", "화", "수", "목", "금", "토", "일"]
+FNAME_RE = re.compile(r"^\d{2}\.\d{2} 출석부\.xlsx$")
 
-반드시 아래 형식의 JSON "만" 출력하세요. 다른 설명, 인사말, 코드블록 표시(```)는 절대 넣지 마세요.
+# 확인/취소 대기 중인 입력: {chat_id: {"sheet","date","data","warnings"}}
+pending: dict[int, dict] = {}
+# 잡담용 짧은 기억: {chat_id: [messages]}
+chat_history: dict[int, list] = {}
+
+
+# ── 저장소 헬퍼 ────────────────────────────────────────────────
+def month_filename(year, month):
+    return f"{str(year)[2:]}.{month:02d} 출석부.xlsx"
+
+
+def month_path(year, month):
+    return os.path.join(DATA_DIR, month_filename(year, month))
+
+
+def current_ym():
+    t = datetime.date.today()
+    return t.year, t.month
+
+
+def schedules_path():
+    return os.path.join(DATA_DIR, "schedules.json")
+
+
+def load_schedules():
+    p = schedules_path()
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    save_schedules(ac.DEFAULT_SCHEDULES)
+    return dict(ac.DEFAULT_SCHEDULES)
+
+
+def save_schedules(s):
+    with open(schedules_path(), "w", encoding="utf-8") as f:
+        json.dump(s, f, ensure_ascii=False, indent=2)
+
+
+def chats_path():
+    return os.path.join(DATA_DIR, "chats.json")
+
+
+def remember_chat(chat_id):
+    ids = set()
+    if os.path.exists(chats_path()):
+        with open(chats_path(), encoding="utf-8") as f:
+            ids = set(json.load(f))
+    if chat_id not in ids:
+        ids.add(chat_id)
+        with open(chats_path(), "w", encoding="utf-8") as f:
+            json.dump(sorted(ids), f)
+
+
+def known_chats():
+    if os.path.exists(chats_path()):
+        with open(chats_path(), encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def list_month_files():
+    return sorted(f for f in os.listdir(DATA_DIR) if FNAME_RE.match(f))
+
+
+def latest_month_file(before=None):
+    """가장 최근 YY.MM 파일명. before(파일명) 미만으로 제한 가능."""
+    files = list_month_files()
+    if before:
+        files = [f for f in files if f < before]
+    return files[-1] if files else None
+
+
+def load_current_wb():
+    y, m = current_ym()
+    p = month_path(y, m)
+    if os.path.exists(p):
+        return ac.load_workbook(p), p
+    return None, p
+
+
+def load_latest_wb():
+    """가장 최근 달 파일을 로드 (파싱 시 명단/맥락용). 없으면 (None, None)."""
+    f = latest_month_file()
+    if not f:
+        return None, None
+    p = os.path.join(DATA_DIR, f)
+    return ac.load_workbook(p), p
+
+
+def load_wb_for_date(date_str):
+    """'8/4' → 8월 파일 로드. 반환 (wb|None, path, month)."""
+    month = int(str(date_str).split("/")[0])
+    y = datetime.date.today().year
+    p = month_path(y, month)
+    if os.path.exists(p):
+        return ac.load_workbook(p), p, month
+    return None, p, month
+
+
+# ── 새 달 생성 ────────────────────────────────────────────────
+def generate_month_file(year, month):
+    """지난달(가장 최근) 파일을 바탕으로 (year,month) 파일 생성. 반환: 저장경로."""
+    target_name = month_filename(year, month)
+    src_name = latest_month_file(before=target_name)
+    if not src_name:
+        raise FileNotFoundError("바탕이 될 이전 달 출석부가 없습니다. 먼저 파일을 보내주세요.")
+    src = ac.load_workbook(os.path.join(DATA_DIR, src_name))
+    scheds = load_schedules()
+    schedules = {k: v for k, v in scheds.items() if k in src.sheetnames}
+    wb = ac.generate_month(src, year, month, schedules)
+    out = month_path(year, month)
+    wb.save(out)
+    log.info("생성 완료: %s (바탕: %s)", out, src_name)
+    return out
+
+
+# ── Claude 파싱 ───────────────────────────────────────────────
+PARSE_SYSTEM = """너는 학원 출석부 입력 도우미다. 선생님의 한국어 메시지를 출석부 기록용 JSON으로 변환한다.
+반드시 아래 형식의 JSON만 출력한다(설명·코드블록 금지).
 
 {
-  "problems": [
-    {
-      "number": 1,
-      "problem": "문제 내용을 짧게",
-      "correct_answer": "내가 직접 계산한 정답",
-      "student_answer": "학생이 사진에 쓴 답",
-      "correct": true,
-      "note": "문제 번호가 사진에서 어디 있는지",
-      "point": [x, y]
-    }
-  ]
+  "type": "attendance" 또는 "other",
+  "sheet": "<반 시트명 정확히>",
+  "date": "M/D",
+  "출석":   {"학생명": "O" 또는 "X(사유)"},
+  "수업내용": "<문자열>",
+  "과제수행": {"학생명": "O" 또는 "X"},
+  "다음과제": "<문자열>",
+  "비고":   {"학생명": "<문자열>"}
 }
 
-채점 순서 (반드시 이 순서대로 각 필드를 채우세요):
-1. problem: 문제를 읽고 무슨 문제인지 적습니다.
-2. correct_answer: 그 문제의 정답을 "직접, 단계적으로, 신중히" 계산해서 적습니다.
-   (계산 실수를 하지 않도록 꼼꼼히 확인하세요.)
-3. student_answer: 학생이 사진에 실제로 써놓은 답을 그대로 읽어 적습니다.
-4. correct: correct_answer 와 student_answer 를 비교합니다.
-   - 값이 같으면(예: 1/2 와 0.5 처럼 형태만 다르고 값이 같으면) true.
-   - 값이 다르면 false.
-   - 학생 답을 알아볼 수 없으면 false.
-5. note / point: 그 문제 번호의 좌측 상단 위치를 신중히 보고 좌표를 매깁니다.
-
-좌표 규칙:
-- point 는 그 문제의 "좌측 상단"(보통 문제 번호가 적힌 지점)의 좌표입니다. 여기에 O/빗금이 그려집니다.
-- 좌표는 사진의 왼쪽 위를 (0,0), 오른쪽 아래를 (1000,1000) 으로 하는 0~1000 사이 정수입니다.
-  (실제 사진 크기와 상관없이 항상 0~1000 비율로 환산해서 쓰세요.)
-
-문제가 하나도 없거나 아무것도 알아볼 수 없으면 {"problems": []} 를 출력하세요."""
+규칙:
+- 출석/과제 관련 입력이면 type="attendance", 그 외 잡담·질문이면 {"type":"other"} 만 출력.
+- sheet 는 제공된 시트 목록 중 하나와 정확히 일치해야 한다.
+- 학생명은 제공된 명단의 이름과 정확히 일치시킨다(부분/별칭이면 가장 맞는 이름으로).
+- date 는 'M/D' 형식(예: 8/4). '오늘/어제/지난 화요일' 등은 오늘 날짜 기준으로 계산.
+- 언급되지 않은 항목(키)은 넣지 않는다. 값이 없으면 그 키를 생략.
+- '전원/다 출석/나머지 다 출석' 같은 표현은 명단 전체에 O 로 채우되, 개별 언급(결석 등)이 우선.
+- 출석 O 는 문자 그대로 "O"(대문자 오), 결석/사유는 "X(사유)".
+"""
 
 
-def _extract_json(text: str) -> dict:
-    """Claude 응답에서 JSON 부분만 안전하게 뽑아냅니다.
-
-    가끔 앞뒤에 설명이나 ```json 같은 게 섞여 와도, 첫 '{' 부터
-    마지막 '}' 까지를 잘라서 파싱합니다. 실패하면 빈 결과를 돌려줍니다.
-    """
+async def parse_message(text, wb):
+    today = datetime.date.today()
+    rosters = ac.rosters_summary(wb)
+    dates = ac.sheet_dates(wb)
+    ctx = {
+        "오늘": f"{today.year}-{today.month:02d}-{today.day:02d} ({WD[today.weekday()]}요일)",
+        "시트별_명단": rosters,
+        "시트별_수업일": dates,
+    }
+    user = (
+        f"[참고정보]\n{json.dumps(ctx, ensure_ascii=False)}\n\n"
+        f"[선생님 메시지]\n{text}"
+    )
+    resp = await claude.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=1500,
+        system=PARSE_SYSTEM,
+        messages=[{"role": "user", "content": user}],
+    )
+    raw = "".join(b.text for b in resp.content if b.type == "text").strip()
+    m = re.search(r"\{.*\}", raw, re.S)
+    if not m:
+        return {"type": "other"}
     try:
-        start = text.index("{")
-        end = text.rindex("}") + 1
-        return json.loads(text[start:end])
-    except (ValueError, json.JSONDecodeError):
-        return {"problems": []}
+        return json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return {"type": "other"}
 
 
-def _draw_hand_circle(draw, cx, cy, radius, color, width) -> None:
-    """사람이 펜으로 쓱 그린 듯한 동그라미. (살짝 삐뚤빼뚤 + 시작/끝이 겹침)"""
-    # 한 바퀴(2π)보다 조금 더 돌려서, 실제 손그림처럼 시작과 끝이 겹치게 합니다.
-    start = random.uniform(-0.5, 0.1)
-    end = start + 2 * math.pi + random.uniform(0.4, 0.9)
-    # 완전한 원이 아니라 살짝 찌그러진 타원 + 약간의 기울기.
-    rx = radius * random.uniform(1.0, 1.18)
-    ry = radius * random.uniform(0.82, 1.0)
-    tilt = random.uniform(-0.35, 0.35)
-    ct, st = math.cos(tilt), math.sin(tilt)
-
-    steps = 64
-    pts = []
-    for i in range(steps + 1):
-        a = start + (end - start) * i / steps
-        wob = 1 + random.uniform(-0.05, 0.05)  # 반지름이 미세하게 흔들림
-        ex, ey = rx * wob * math.cos(a), ry * wob * math.sin(a)
-        x = cx + ex * ct - ey * st
-        y = cy + ex * st + ey * ct
-        pts.append((x, y))
-    draw.line(pts, fill=color, width=width, joint="curve")
+async def chat_reply(chat_id, text):
+    """출석과 무관한 메시지는 일반 대화로 답한다."""
+    history = chat_history.get(chat_id, [])
+    history.append({"role": "user", "content": text})
+    resp = await claude.messages.create(
+        model=CLAUDE_MODEL, max_tokens=800, messages=history
+    )
+    reply = "".join(b.text for b in resp.content if b.type == "text")
+    history.append({"role": "assistant", "content": reply})
+    chat_history[chat_id] = history[-12:]
+    return reply
 
 
-def _draw_hand_slash(draw, cx, cy, radius, color, width) -> None:
-    """사람이 그은 듯한 빗금(／). 살짝 휘어진 대각선."""
-    x1, y1 = cx - radius, cy + radius
-    x2, y2 = cx + radius, cy - radius
-    # 중간점을 살짝 옆으로 밀어 곡선처럼 보이게 합니다.
-    mx = (x1 + x2) / 2 + random.uniform(-0.15, 0.15) * radius
-    my = (y1 + y2) / 2 + random.uniform(-0.15, 0.15) * radius
-    pts = []
-    steps = 16
-    for i in range(steps + 1):
-        t = i / steps
-        # 2차 베지어 곡선으로 부드럽게.
-        x = (1 - t) ** 2 * x1 + 2 * (1 - t) * t * mx + t ** 2 * x2
-        y = (1 - t) ** 2 * y1 + 2 * (1 - t) * t * my + t ** 2 * y2
-        pts.append((x, y))
-    draw.line(pts, fill=color, width=width, joint="curve")
+# ── 미리보기 텍스트 ────────────────────────────────────────────
+def build_preview(wb, parsed):
+    sheet = parsed.get("sheet")
+    date = parsed.get("date")
+    if sheet not in wb.sheetnames:
+        return None, f"'{sheet}' 반을 찾을 수 없어요. (반: {', '.join(wb.sheetnames)})"
+    ws = wb[sheet]
+    if ac.find_date_block(ws, date) is None:
+        ds = ", ".join(ac.sheet_dates(wb)[sheet])
+        return None, f"{sheet}에 '{date}' 수업일이 없어요.\n가능한 날짜: {ds}"
+
+    roster = set(ac.get_roster(ws).keys())
+    lines = [f"📋 <b>{sheet}</b> · <b>{date}</b> 에 이렇게 기록할게요:"]
+    warnings = []
+
+    att = parsed.get("출석") or {}
+    if att:
+        parts = []
+        for name, val in att.items():
+            mark = "❌" if val not in ("O", "o") else "✅"
+            parts.append(f"{name} {val}")
+            if name not in roster:
+                warnings.append(name)
+        lines.append("• 출석: " + ", ".join(parts))
+    if parsed.get("수업내용"):
+        lines.append(f"• 수업내용: {parsed['수업내용']}")
+    hw = parsed.get("과제수행") or {}
+    if hw:
+        lines.append("• 과제수행: " + ", ".join(f"{n} {v}" for n, v in hw.items()))
+        warnings += [n for n in hw if n not in roster]
+    if parsed.get("다음과제"):
+        lines.append(f"• 다음과제: {parsed['다음과제']}")
+    bg = parsed.get("비고") or {}
+    if isinstance(bg, dict) and bg:
+        lines.append("• 비고: " + ", ".join(f"{n}: {v}" for n, v in bg.items()))
+        warnings += [n for n in bg if n not in roster]
+
+    if warnings:
+        lines.append("\n⚠️ 명단에 없는 이름: " + ", ".join(sorted(set(warnings))) + " (그대로 두면 무시됩니다)")
+    lines.append("\n맞으면 <b>확인</b>, 아니면 <b>취소</b> 라고 보내주세요.")
+    return "\n".join(lines), None
 
 
-def _draw_marks(image_bytes: bytes, problems: list) -> bytes:
-    """각 문제의 좌측 상단에 O(정답) / 빗금(오답)을 그려서 새 사진(바이트)으로 돌려줍니다."""
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    width, height = image.size
-    draw = ImageDraw.Draw(image)
-
-    # 표시 크기/두께를 사진 크기에 비례하게 정합니다. (고정 크기 마크)
-    radius = max(12, round(min(width, height) / 22))
-    line_width = max(3, round(min(width, height) / 130))
-    red = (220, 30, 30)
-
-    for item in problems:
-        point = item.get("point")
-        if not point or len(point) != 2:
-            continue
-
-        # 0~1000 비율 좌표를 실제 픽셀 좌표로 환산.
-        cx = point[0] / 1000 * width
-        cy = point[1] / 1000 * height
-        # 마크가 사진 밖으로 나가지 않게 살짝 안쪽으로 당겨줍니다.
-        cx = min(max(cx, radius), width - radius)
-        cy = min(max(cy, radius), height - radius)
-
-        if item.get("correct"):
-            _draw_hand_circle(draw, cx, cy, radius, red, line_width)
-        else:
-            _draw_hand_slash(draw, cx, cy, radius, red, line_width)
-
-    out = io.BytesIO()
-    image.save(out, format="JPEG")
-    return out.getvalue()
-
-
-# ── 3-a. 텍스트 메시지가 올 때 실행되는 함수 ────────────────────
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_text = update.message.text  # 사용자가 보낸 글자
-
-    # Claude 에게 물어보기
-    response = claude.messages.create(
-        model="claude-opus-4-8",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": user_text}],
+# ── 명령어 핸들러 ──────────────────────────────────────────────
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    remember_chat(update.effective_chat.id)
+    await update.message.reply_text(
+        "안녕하세요! 출석부 봇이에요. 📋\n\n"
+        "• 출석 입력: 그냥 자유롭게 적어주세요\n"
+        "   예) 초5 오늘 남우현 결석, 나머지 출석. 수업 분수나눗셈\n"
+        "• /출석부 : 이번 달 파일 받기 (/출석부 26.07 처럼 특정 달도)\n"
+        "• /일정 : 반별 수업 요일 보기·변경\n"
+        "• /생성 : 이번 달 파일 새로 만들기\n"
+        "• xlsx 파일을 보내면 저장해요\n\n"
+        "매월 1일엔 자동으로 새 달 출석부를 만들어 알려드려요."
     )
 
-    # 응답에서 텍스트만 뽑아내기
-    reply = "".join(
-        block.text for block in response.content if block.type == "text"
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start(update, context)
+
+
+async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    scheds = load_schedules()
+    args = context.args
+    if not args:
+        lines = ["📅 반별 수업 요일:"]
+        for name, idxs in scheds.items():
+            lines.append(f"• {name}: {'·'.join(WD[i] for i in idxs)}")
+        lines.append("\n변경: /일정 고1 화목토")
+        await update.message.reply_text("\n".join(lines))
+        return
+    if len(args) < 2:
+        await update.message.reply_text("형식: /일정 <반> <요일들>  예) /일정 고1 화목토")
+        return
+    name = args[0]
+    if name not in scheds:
+        await update.message.reply_text(f"'{name}' 반이 없어요. ({', '.join(scheds)})")
+        return
+    days = "".join(args[1:])
+    idxs = sorted({WD.index(ch) for ch in days if ch in WD})
+    if not idxs:
+        await update.message.reply_text("요일을 인식 못했어요. 예) 화목토")
+        return
+    scheds[name] = idxs
+    save_schedules(scheds)
+    await update.message.reply_text(
+        f"✅ {name} 수업 요일을 {'·'.join(WD[i] for i in idxs)} 로 바꿨어요. (다음 달 생성부터 적용)"
     )
 
-    # 텔레그램으로 답장 보내기
-    await update.message.reply_text(reply)
+
+async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    remember_chat(update.effective_chat.id)
+    if context.args:
+        arg = context.args[0].replace("월", "").strip()
+        m = re.match(r"(\d{2})[.\-/](\d{1,2})", arg)
+        if not m:
+            await update.message.reply_text("형식: /출석부 26.08")
+            return
+        fname = f"{m.group(1)}.{int(m.group(2)):02d} 출석부.xlsx"
+        path = os.path.join(DATA_DIR, fname)
+    else:
+        y, m = current_ym()
+        path, fname = month_path(y, m), month_filename(y, m)
+    if not os.path.exists(path):
+        avail = ", ".join(f.replace(" 출석부.xlsx", "") for f in list_month_files()) or "없음"
+        await update.message.reply_text(f"'{fname}' 파일이 없어요.\n보유: {avail}")
+        return
+    with open(path, "rb") as f:
+        await update.message.reply_document(document=f, filename=fname)
 
 
-# ── 3-b. 사진이 올 때 실행되는 함수 (수학 문제 채점) ────────────
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # "채점 중" 이라고 먼저 알려줍니다. (Claude 응답에 몇 초 걸립니다)
-    await update.message.reply_text("사진을 받았어요. 채점 중입니다... ✏️")
-
-    # 텔레그램은 같은 사진을 여러 해상도로 보내줍니다.
-    # 마지막([-1]) 것이 가장 큰(선명한) 사진이라 채점에 유리합니다.
-    photo = update.message.photo[-1]
-    tg_file = await context.bot.get_file(photo.file_id)
-
-    # 사진을 메모리로 내려받습니다.
-    image_bytes = bytes(await tg_file.download_as_bytearray())
-    image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-
-    # Claude 에게 사진을 보내고, 각 답의 위치 + 정답 여부(JSON)를 받습니다.
-    response = claude.messages.create(
-        model="claude-opus-4-8",
-        max_tokens=4000,
-        system=GRADING_PROMPT,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            # 텔레그램 사진은 보통 JPEG 로 옵니다.
-                            "media_type": "image/jpeg",
-                            "data": image_b64,
-                        },
-                    },
-                    {"type": "text", "text": "이 사진을 채점해서 JSON 으로 알려주세요."},
-                ],
-            }
-        ],
-    )
-
-    raw = "".join(block.text for block in response.content if block.type == "text")
-    result = _extract_json(raw)
-    problems = result.get("problems", [])
-
-    if not problems:
+async def cmd_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    y, m = current_ym()
+    if os.path.exists(month_path(y, m)):
         await update.message.reply_text(
-            "채점할 답을 찾지 못했어요. 😢 문제와 답이 잘 보이게, 밝은 곳에서 다시 찍어 보내주세요."
+            f"{month_filename(y, m)} 는 이미 있어요. 덮어쓰지 않았습니다. (받으려면 /출석부)"
+        )
+        return
+    try:
+        out = generate_month_file(y, m)
+    except FileNotFoundError as e:
+        await update.message.reply_text(str(e))
+        return
+    await update.message.reply_text(f"✅ {os.path.basename(out)} 를 만들었어요.")
+    with open(out, "rb") as f:
+        await update.message.reply_document(document=f, filename=os.path.basename(out))
+
+
+# ── 파일 업로드(시드) ──────────────────────────────────────────
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+    if not doc.file_name.lower().endswith(".xlsx"):
+        await update.message.reply_text("xlsx 파일만 저장할 수 있어요.")
+        return
+    tgfile = await doc.get_file()
+    data = bytes(await tgfile.download_as_bytearray())
+    try:
+        wb = ac.load_workbook(data)
+        dates = ac.sheet_dates(wb)
+        # 첫 날짜로 연·월 추정
+        first = next((d[0] for d in dates.values() if d), None)
+        y = datetime.date.today().year
+        mth = int(first.split("/")[0]) if first else datetime.date.today().month
+    except Exception as e:
+        await update.message.reply_text(f"파일을 읽지 못했어요: {e}")
+        return
+    fname = month_filename(y, mth)
+    with open(os.path.join(DATA_DIR, fname), "wb") as f:
+        f.write(data)
+    remember_chat(update.effective_chat.id)
+    await update.message.reply_text(
+        f"✅ 저장했어요: {fname}\n이제 출석을 자유롭게 입력하시면 됩니다."
+    )
+
+
+# ── 일반 텍스트 ────────────────────────────────────────────────
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    text = update.message.text.strip()
+    remember_chat(chat_id)
+
+    # 한글 키워드를 명령처럼 처리 (슬래시 있어도/없어도)
+    low = text.lstrip("/").strip()
+    parts = low.split()
+    kw = parts[0] if parts else ""
+    if kw in ("출석부", "다운로드"):
+        context.args = parts[1:]
+        return await cmd_download(update, context)
+    if kw in ("일정", "스케줄"):
+        context.args = parts[1:]
+        return await cmd_schedule(update, context)
+    if low in ("생성", "새달", "새달생성"):
+        return await cmd_generate(update, context)
+    if low in ("시작", "도움말", "도움"):
+        return await start(update, context)
+
+    # 확인/취소 대기 처리
+    if chat_id in pending:
+        if text in ("확인", "네", "응", "ㅇㅇ", "ok", "OK", "예"):
+            info = pending.pop(chat_id)
+            wb, path, _ = load_wb_for_date(info["date"])
+            if wb is None:
+                await update.message.reply_text("해당 달 출석부 파일이 없어요. 파일을 보내거나 /생성 해주세요.")
+                return
+            written, warnings = ac.write_attendance(wb, info["sheet"], info["date"], info["data"])
+            wb.save(path)
+            msg = f"✅ 기록 완료 ({info['sheet']} {info['date']}) — {len(written)}건"
+            if warnings:
+                msg += "\n⚠️ " + " / ".join(warnings)
+            await update.message.reply_text(msg)
+            return
+        if text in ("취소", "아니", "아니오", "no", "cancel"):
+            pending.pop(chat_id)
+            await update.message.reply_text("취소했어요.")
+            return
+        # 그 외 입력은 새 파싱으로 진행(기존 대기 덮어씀)
+
+    parse_wb, _ = load_latest_wb()
+    if parse_wb is None:
+        await update.message.reply_text(
+            "출석부 파일이 아직 없어요.\n출석부 xlsx 파일을 봇에게 보내거나 /생성 을 눌러주세요."
         )
         return
 
-    # 원본 사진 위에 O / 빗금을 그려서 다시 보냅니다.
-    marked = _draw_marks(image_bytes, problems)
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    parsed = await parse_message(text, parse_wb)
 
-    correct_count = sum(1 for p in problems if p.get("correct"))
-    total = len(problems)
-    await update.message.reply_photo(
-        photo=io.BytesIO(marked),
-        caption=f"채점 완료! ⭕ {correct_count} / 전체 {total}",
-    )
+    if parsed.get("type") != "attendance":
+        reply = await chat_reply(chat_id, text)
+        await update.message.reply_text(reply)
+        return
+
+    # 날짜의 달에 해당하는 파일을 대상으로
+    target_wb, _, month = load_wb_for_date(parsed.get("date", "0/0"))
+    if target_wb is None:
+        await update.message.reply_text(
+            f"{month}월 출석부 파일이 없어요. 먼저 파일을 보내거나 /생성 해주세요."
+        )
+        return
+
+    preview, err = build_preview(target_wb, parsed)
+    if err:
+        await update.message.reply_text("⚠️ " + err)
+        return
+    pending[chat_id] = {"sheet": parsed["sheet"], "date": parsed["date"], "data": parsed}
+    await update.message.reply_text(preview, parse_mode="HTML")
 
 
-# ── 4. 봇 실행 ────────────────────────────────────────────────
-def main() -> None:
+# ── 매월 1일 자동 생성 ─────────────────────────────────────────
+async def monthly_job(context: ContextTypes.DEFAULT_TYPE):
+    """이번 달 파일이 없으면(=달이 바뀌면) 지난달 바탕으로 생성하고 알림.
+    시간대에 무관하게 '이번 달 파일 유무'로 판단하므로 매일 돌려도 안전하다."""
+    y, m = current_ym()
+    if os.path.exists(month_path(y, m)):
+        return
+    if not latest_month_file():  # 바탕이 될 파일이 하나도 없으면 조용히 대기
+        return
+    try:
+        out = generate_month_file(y, m)
+    except FileNotFoundError as e:
+        log.warning("자동 생성 보류: %s", e)
+        return
+    for chat_id in known_chats():
+        try:
+            await context.bot.send_message(chat_id, f"📄 {os.path.basename(out)} 를 새로 만들었어요!")
+            with open(out, "rb") as f:
+                await context.bot.send_document(chat_id, document=f, filename=os.path.basename(out))
+        except Exception as e:
+            log.warning("알림 실패 %s: %s", chat_id, e)
+
+
+# ── 실행 ──────────────────────────────────────────────────────
+def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # 사진이 오면 handle_photo (수학 문제 채점) 를 호출
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    # 텔레그램은 한글 슬래시명령을 지원하지 않으므로 ASCII 명령만 등록하고,
+    # 한글 키워드(출석부/일정/생성)는 아래 handle_text 안에서 처리한다.
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("download", cmd_download))
+    app.add_handler(CommandHandler("schedule", cmd_schedule))
+    app.add_handler(CommandHandler("generate", cmd_generate))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # 텍스트 메시지(명령어 제외)가 오면 handle_message 를 호출
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
-    )
+    if app.job_queue is not None:
+        # 매일 확인 + 시작 직후 1회 확인 (달이 바뀌면 새 파일 생성)
+        app.job_queue.run_daily(monthly_job, time=datetime.time(0, 5))
+        app.job_queue.run_once(monthly_job, when=10)
+        log.info("월간 자동 생성 스케줄 등록됨 (매일 확인)")
+    else:
+        log.warning("job_queue 미설치 — 자동 생성 비활성 (requirements 확인)")
 
-    print("봇이 실행되었습니다. 텔레그램에서 메시지나 사진을 보내보세요. (종료: Ctrl+C)")
+    log.info("출석부 봇 시작")
     app.run_polling()
 
 

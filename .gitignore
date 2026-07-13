@@ -3,6 +3,10 @@
 API key.txt
 *.key
 
+# 학생 개인정보(출석부) — 저장소에 올리지 않음
+data/
+*.xlsx
+
 # 봇과 무관한 파일
 tetris.html
 
