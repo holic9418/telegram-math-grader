@@ -415,6 +415,12 @@ def write_attendance(wb, sheet, date_str, data):
             ws.cell(r, STUDENT_FIRST_COL).value = val  # 병합 앵커
             written.append(f"{label} = {val}")
 
+    # 비고 행 라벨 변경 (일일테스트 등) — B열 라벨만 이 블록에서 교체
+    new_label = data.get('비고라벨') or data.get('비고제목')
+    if isinstance(new_label, str) and new_label.strip():
+        ws.cell(top + ROW_OFFSET['비고'], 2).value = new_label.strip()
+        written.append(f"비고 라벨 → {new_label.strip()}")
+
     return written, warnings
 
 
