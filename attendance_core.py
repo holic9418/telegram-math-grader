@@ -337,9 +337,9 @@ COLOR_BLACK = 'FF000000'
 
 
 def _attendance_color(value):
-    """출석 값 → 글자색. 결석=빨강, 지각=파랑, 정상=검정."""
+    """출석 값 → 글자색. 결석=빨강, 지각·조퇴=파랑, 정상=검정."""
     s = str(value)
-    if '지각' in s:
+    if '지각' in s or '조퇴' in s:
         return COLOR_BLUE
     if '결석' in s or '결' == s.strip() or 'X' in s.upper():
         return COLOR_RED
