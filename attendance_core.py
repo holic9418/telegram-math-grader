@@ -8,7 +8,7 @@
 import io, re, zipfile, datetime, calendar
 from copy import copy
 import openpyxl
-from openpyxl.styles import Font, Alignment
+from openpyxl.styles import Font, Alignment, Border
 import holidays as _holidays
 
 WEEKDAY_KR = ['월', '화', '수', '목', '금', '토', '일']
@@ -176,11 +176,12 @@ def generate_month(src_workbook, year, month, schedules=None):
         # 3) 새 블록 기록
         for i, d in enumerate(days):
             top = start + BLOCK_SIZE * i
-            # 스타일/행높이 적용
+            # 스타일/행높이 적용 (지난달 결석 표시인 대각선은 제거)
             for k in range(BLOCK_SIZE):
                 r = top + k
                 for c in range(1, last_col + 1):
                     ws.cell(r, c)._style = copy(tpl['styles'][k][c])
+                    _strip_diagonal(ws.cell(r, c))
                 if tpl['heights'][k] is not None:
                     ws.row_dimensions[r].height = tpl['heights'][k]
                 ws.cell(r, 2).value = BLOCK_LABELS[k]
@@ -204,6 +205,15 @@ def generate_month(src_workbook, year, month, schedules=None):
                         if g1 > g0:
                             ws.merge_cells(start_row=top + rel, start_column=g0,
                                            end_row=top + rel, end_column=g1)
+
+        # 4) 마지막 블록 아래 잔여 영역 비우기 (지난달이 더 길었던 경우)
+        last_end = start + BLOCK_SIZE * len(days) - 1
+        for r in range(last_end + 1, ws.max_row + 1):
+            ws.row_dimensions[r].height = None
+            for c in range(1, last_col + 1):
+                cell = ws.cell(r, c)
+                cell.value = None
+                cell.border = Border()
     return wb
 
 
@@ -271,6 +281,56 @@ def next_year_month(year, month):
     return (year + 1, 1) if month == 12 else (year, month + 1)
 
 
+def _strip_diagonal(cell):
+    """셀의 대각선(사선) 테두리만 제거하고 나머지 테두리는 유지."""
+    b = cell.border
+    if (b.diagonal and getattr(b.diagonal, 'style', None)) or b.diagonalUp or b.diagonalDown:
+        cell.border = Border(left=b.left, right=b.right, top=b.top, bottom=b.bottom)
+
+
+def _is_holiday_block(ws, top, last_col):
+    """블록에 사각형(여러행×여러열) 병합이 있으면 공휴일/휴강 블록으로 간주."""
+    for rng in ws.merged_cells.ranges:
+        if (rng.min_row >= top and rng.max_row <= top + BLOCK_SIZE - 1
+                and rng.min_col >= STUDENT_FIRST_COL
+                and rng.max_row > rng.min_row and rng.max_col > rng.min_col):
+            return True
+    return False
+
+
+def normalize_block(ws, top, last_col, groups):
+    """블록을 '전원 정상출석' 기준 깨끗한 서식으로 정리한다.
+       - 학생 세로병합(결석 표시) 해제, 병합됐던 칸 테두리를 정상 칸 기준으로 통일
+       - 대각선(사선) 제거
+       - 수업내용/다음과제 행을 반(그룹)별 가로 한 칸으로 재병합
+       공휴일/휴강 블록(사각형 병합)은 건드리지 않는다."""
+    if _is_holiday_block(ws, top, last_col):
+        return
+    vcols = set()
+    for rng in list(ws.merged_cells.ranges):
+        if (rng.min_row >= top and rng.max_row <= top + BLOCK_SIZE - 1
+                and rng.min_col >= STUDENT_FIRST_COL):
+            if rng.max_row > rng.min_row and rng.min_col == rng.max_col:
+                vcols.add(rng.min_col)
+            ws.unmerge_cells(str(rng))
+    # 병합 해제된 학생열을 같은 행의 정상 참조열 스타일로 통일
+    for r in range(top, top + BLOCK_SIZE):
+        ref = next((c for c in range(STUDENT_FIRST_COL, last_col + 1) if c not in vcols), None)
+        if ref is not None:
+            for c in vcols:
+                ws.cell(r, c)._style = copy(ws.cell(r, ref)._style)
+    # 남은 대각선 제거
+    for r in range(top, top + BLOCK_SIZE):
+        for c in range(STUDENT_FIRST_COL, last_col + 1):
+            _strip_diagonal(ws.cell(r, c))
+    # 수업내용/다음과제 가로 병합 복원
+    for rel in MERGE_LABEL_ROWS:
+        for (g0, g1) in groups:
+            if g1 > g0:
+                ws.merge_cells(start_row=top + rel, start_column=g0,
+                               end_row=top + rel, end_column=g1)
+
+
 def write_attendance(wb, sheet, date_str, data):
     """data 예:
        {'출석': {'김규림':'O','남우현':'X(결석)'},
@@ -285,6 +345,11 @@ def write_attendance(wb, sheet, date_str, data):
     top = find_date_block(ws, date_str)
     if top is None:
         raise ValueError(f"{sheet}에 '{date_str}' 날짜가 없습니다")
+    # 기록 전에 이 블록의 서식을 깨끗하게 정리(결석 세로병합·대각선 제거 등)
+    start = _find_start_row(ws)
+    last_col = _last_col(ws, start)
+    groups = _detect_groups(ws, start, last_col)
+    normalize_block(ws, top, last_col, groups)
     roster = get_roster(ws)
     written, warnings = [], []
 
