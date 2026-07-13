@@ -331,6 +331,37 @@ def normalize_block(ws, top, last_col, groups):
                                end_row=top + rel, end_column=g1)
 
 
+COLOR_RED = 'FFFF0000'
+COLOR_BLUE = 'FF0000FF'
+COLOR_BLACK = 'FF000000'
+
+
+def _attendance_color(value):
+    """출석 값 → 글자색. 결석=빨강, 지각=파랑, 정상=검정."""
+    s = str(value)
+    if '지각' in s:
+        return COLOR_BLUE
+    if '결석' in s or '결' == s.strip() or 'X' in s.upper():
+        return COLOR_RED
+    return COLOR_BLACK
+
+
+def _homework_color(value):
+    """과제수행 값 → 글자색. 안함=빨강, 50%/절반=파랑, 완료=검정."""
+    s = str(value).strip()
+    if any(k in s for k in ('50', '％', '%', '△', '절반')) or s == '반':
+        return COLOR_BLUE
+    if any(k in s for k in ('X', 'x', '안', '미', '못', '노')):
+        return COLOR_RED
+    return COLOR_BLACK
+
+
+def _apply_font_color(cell, argb):
+    f = cell.font
+    cell.font = Font(name=f.name, size=f.sz, bold=f.bold, italic=f.italic,
+                     underline=f.underline, color=argb)
+
+
 def write_attendance(wb, sheet, date_str, data):
     """data 예:
        {'출석': {'김규림':'O','남우현':'X(결석)'},
@@ -358,7 +389,12 @@ def write_attendance(wb, sheet, date_str, data):
         if student not in roster:
             warnings.append(f"{label}: '{student}' 학생을 못 찾음")
             return
-        ws.cell(r, roster[student]).value = value
+        cell = ws.cell(r, roster[student])
+        cell.value = value
+        if label == '출석':
+            _apply_font_color(cell, _attendance_color(value))
+        elif label == '과제수행':
+            _apply_font_color(cell, _homework_color(value))
         written.append(f"{label} · {student} = {value}")
 
     for label in ('출석', '과제수행', '비고'):
