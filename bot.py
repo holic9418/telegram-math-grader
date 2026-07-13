@@ -228,12 +228,19 @@ async def parse_message(text, wb):
         return {"type": "other"}
 
 
+CHAT_SYSTEM = """너는 학원 선생님을 돕는 '출석부 텔레그램 봇'이다.
+- 출석부 데이터는 서버 파일(xlsx)에 실제로 저장·조회된다. "나는 AI라 접근 못 한다"는 식으로 말하지 마라.
+- 파일을 받고 싶어 하면 '출석부' 또는 '/download' 라고 보내면 된다고 안내해라. 특정 달은 '출석부 7월' 처럼.
+- 출석 입력 예시: '초5 오늘 남우현 결석, 나머지 출석. 수업 분수나눗셈'.
+- 수학 개념 질문 등에는 평소처럼 친절히 답해도 된다. 답은 간결하게."""
+
+
 async def chat_reply(chat_id, text):
-    """출석과 무관한 메시지는 일반 대화로 답한다."""
+    """출석 입력이 아닌 메시지는 봇 성격을 아는 상태로 답한다."""
     history = chat_history.get(chat_id, [])
     history.append({"role": "user", "content": text})
     resp = await claude.messages.create(
-        model=CLAUDE_MODEL, max_tokens=800, messages=history
+        model=CLAUDE_MODEL, max_tokens=800, system=CHAT_SYSTEM, messages=history
     )
     reply = "".join(b.text for b in resp.content if b.type == "text")
     history.append({"role": "assistant", "content": reply})
@@ -332,19 +339,29 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def parse_month_token(text):
+    """'26.08', '26-8', '8월', '2026-08' 등에서 (year, month) 추출. 없으면 None."""
+    t = str(text)
+    m = re.search(r"(\d{2,4})[.\-/](\d{1,2})", t)
+    if m:
+        y = int(m.group(1))
+        y = y if y > 100 else 2000 + y
+        return y, int(m.group(2))
+    m = re.search(r"(\d{1,2})\s*월", t)
+    if m:
+        return datetime.date.today().year, int(m.group(1))
+    return None
+
+
 async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remember_chat(update.effective_chat.id)
-    if context.args:
-        arg = context.args[0].replace("월", "").strip()
-        m = re.match(r"(\d{2})[.\-/](\d{1,2})", arg)
-        if not m:
-            await update.message.reply_text("형식: /출석부 26.08")
-            return
-        fname = f"{m.group(1)}.{int(m.group(2)):02d} 출석부.xlsx"
-        path = os.path.join(DATA_DIR, fname)
+    token = " ".join(context.args) if context.args else ""
+    ym = parse_month_token(token)
+    if ym:
+        y, mth = ym
     else:
-        y, m = current_ym()
-        path, fname = month_path(y, m), month_filename(y, m)
+        y, mth = current_ym()  # 월 지정 없으면 이번 달
+    path, fname = month_path(y, mth), month_filename(y, mth)
     if not os.path.exists(path):
         avail = ", ".join(f.replace(" 출석부.xlsx", "") for f in list_month_files()) or "없음"
         await update.message.reply_text(f"'{fname}' 파일이 없어요.\n보유: {avail}")
@@ -403,13 +420,50 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     remember_chat(chat_id)
 
-    # 한글 키워드를 명령처럼 처리 (슬래시 있어도/없어도)
     low = text.lstrip("/").strip()
     parts = low.split()
     kw = parts[0] if parts else ""
-    if kw in ("출석부", "다운로드"):
-        context.args = parts[1:]
-        return await cmd_download(update, context)
+
+    # 확인/취소 대기 처리 (확인 뒤에 추가 정보가 붙어도 인식하고 병합)
+    if chat_id in pending:
+        confirm_words = ("확인", "네", "응", "ㅇㅇ", "ㅇㅋ", "ok", "예", "오케이", "저장")
+        head = re.sub(r"[.,!~\s]+$", "", kw.lower())
+        if head in confirm_words or low.startswith("확인"):
+            info = pending.pop(chat_id)
+            extra = re.sub(r"^(확인|네|응|예|오케이|저장|ok)\s*[.,!~]*\s*", "", low, flags=re.I).strip()
+            if extra:  # '확인. 수업내용은 …' → 추가 정보 병합
+                pwb, _ = load_latest_wb()
+                if pwb is not None:
+                    merged = await parse_message(f"{info['sheet']} {info['date']} {extra}", pwb)
+                    if merged.get("type") == "attendance":
+                        for key in ("출석", "수업내용", "과제수행", "다음과제", "비고"):
+                            v = merged.get(key)
+                            if not v:
+                                continue
+                            if isinstance(v, dict) and isinstance(info["data"].get(key), dict):
+                                info["data"][key].update(v)
+                            else:
+                                info["data"][key] = v
+            wb, path, _ = load_wb_for_date(info["date"])
+            if wb is None:
+                await update.message.reply_text("해당 달 출석부 파일이 없어요. 파일을 보내거나 /생성 해주세요.")
+                return
+            written, warnings = ac.write_attendance(wb, info["sheet"], info["date"], info["data"])
+            wb.save(path)
+            msg = f"✅ 기록 완료 ({info['sheet']} {info['date']}) — {len(written)}건\n" + "\n".join(
+                "  • " + w for w in written
+            )
+            if warnings:
+                msg += "\n⚠️ " + " / ".join(warnings)
+            await update.message.reply_text(msg)
+            return
+        if head in ("취소", "아니", "아니오", "no", "cancel"):
+            pending.pop(chat_id)
+            await update.message.reply_text("취소했어요.")
+            return
+        # 그 외 입력은 아래에서 새로 처리 (기존 대기는 덮어씀)
+
+    # 한글 키워드를 명령처럼 처리 (슬래시 있어도/없어도)
     if kw in ("일정", "스케줄"):
         context.args = parts[1:]
         return await cmd_schedule(update, context)
@@ -417,27 +471,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_generate(update, context)
     if low in ("시작", "도움말", "도움"):
         return await start(update, context)
-
-    # 확인/취소 대기 처리
-    if chat_id in pending:
-        if text in ("확인", "네", "응", "ㅇㅇ", "ok", "OK", "예"):
-            info = pending.pop(chat_id)
-            wb, path, _ = load_wb_for_date(info["date"])
-            if wb is None:
-                await update.message.reply_text("해당 달 출석부 파일이 없어요. 파일을 보내거나 /생성 해주세요.")
-                return
-            written, warnings = ac.write_attendance(wb, info["sheet"], info["date"], info["data"])
-            wb.save(path)
-            msg = f"✅ 기록 완료 ({info['sheet']} {info['date']}) — {len(written)}건"
-            if warnings:
-                msg += "\n⚠️ " + " / ".join(warnings)
-            await update.message.reply_text(msg)
-            return
-        if text in ("취소", "아니", "아니오", "no", "cancel"):
-            pending.pop(chat_id)
-            await update.message.reply_text("취소했어요.")
-            return
-        # 그 외 입력은 새 파싱으로 진행(기존 대기 덮어씀)
+    # '출석부' 다운로드 요청 (예: '출석부', '출석부 7월', '7월 출석부 확인')
+    if "출석부" in low and not re.match(r"^(초|중|고)\d", low):
+        context.args = parts
+        return await cmd_download(update, context)
 
     parse_wb, _ = load_latest_wb()
     if parse_wb is None:
