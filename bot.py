@@ -43,8 +43,14 @@ log = logging.getLogger("attendance-bot")
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-4-8")
-DATA_DIR = os.environ.get("DATA_DIR", "data")
+# 저장 폴더 우선순위: DATA_DIR > Railway 볼륨 자동경로 > 로컬 ./data
+DATA_DIR = (
+    os.environ.get("DATA_DIR")
+    or os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+    or "data"
+)
 os.makedirs(DATA_DIR, exist_ok=True)
+log.info("데이터 저장 폴더: %s", DATA_DIR)
 
 claude = anthropic.AsyncAnthropic()
 
