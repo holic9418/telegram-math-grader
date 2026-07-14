@@ -924,6 +924,59 @@ async def monthly_job(context: ContextTypes.DEFAULT_TYPE):
             log.warning("알림 실패 %s: %s", chat_id, e)
 
 
+# ── 밀린(지난 날) 미입력 출석 알림 ────────────────────────────
+def scan_backlog(wb, today):
+    """각 반에서 '오늘 이전' 수업일 중 출석이 아직 안 채워진 날짜. {반: ['M/D',...]}"""
+    out = {}
+    dates_by = ac.sheet_dates(wb)
+    for cls in wb.sheetnames:
+        ws = wb[cls]
+        miss = []
+        for ds in dates_by.get(cls, []):
+            try:
+                m, d = map(int, ds.split('/'))
+                dd = datetime.date(today.year, m, d)
+            except ValueError:
+                continue
+            if dd >= today:
+                continue  # 오늘·미래는 당일 알림(reminder_job) 담당
+            if ac.attendance_recorded(ws, ds) is False:
+                miss.append(ds)
+        if miss:
+            out[cls] = miss
+    return out
+
+
+_last_backlog = {"day": None}
+
+
+async def backlog_job(context: ContextTypes.DEFAULT_TYPE):
+    """매일 13:00(KST) — 지난 수업일 중 미입력이 있으면 입력할 때까지 하루 한 번 알림."""
+    now = datetime.datetime.now(KST)
+    if not (now.hour == 13 and now.minute < 3):
+        return
+    key = now.date().isoformat()
+    if _last_backlog["day"] == key:
+        return
+    _last_backlog["day"] = key
+    wb, _ = load_current_wb()
+    if wb is None:
+        return
+    backlog = scan_backlog(wb, now.date())
+    if not backlog:
+        return
+    teachers = load_teachers()
+    for cls, dates in backlog.items():
+        recipients = (teachers.get(cls, []) if teachers else known_chats())
+        ktxt = ", ".join(f"{int(x.split('/')[0])}월 {int(x.split('/')[1])}일" for x in dates)
+        msg = f"📌 {cls} · 아직 출석 입력이 안 된 날이 있어요: {ktxt}\n출석부를 입력해주세요!"
+        for chat_id in recipients:
+            try:
+                await context.bot.send_message(chat_id, msg)
+            except Exception as e:
+                log.warning("미입력 알림 실패 %s: %s", chat_id, e)
+
+
 # ── 주간 출결 보고서 ───────────────────────────────────────────
 def generate_weekly_report(target=None):
     """target(기본 오늘)이 속한 주(월~일) 보고서 PDF 생성. 반환: (경로, 반수)|(None,0)."""
@@ -1016,7 +1069,9 @@ def main():
         app.job_queue.run_repeating(reminder_job, interval=60, first=15)
         # 매주 일요일 18:00(KST) 주간 출결 보고서
         app.job_queue.run_repeating(report_job, interval=60, first=25)
-        log.info("월간 생성 + 출석 알림 + 주간 보고서 스케줄 등록됨")
+        # 매일 13:00(KST) 밀린 미입력 출석 알림
+        app.job_queue.run_repeating(backlog_job, interval=60, first=35)
+        log.info("월간 생성 + 출석/미입력 알림 + 주간 보고서 스케줄 등록됨")
     else:
         log.warning("job_queue 미설치 — 자동 생성/알림 비활성 (requirements 확인)")
 
