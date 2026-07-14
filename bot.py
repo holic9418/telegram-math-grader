@@ -910,10 +910,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if any(k in low for k in ("미리보기", "캡처", "보여줘", "보여주", "이미지로")):
         return await cmd_preview(update, context)
     # '남우현 7월' 처럼 이름+기간만 온 경우도 학생별 미리보기로 (뒤에 다른 말 없을 때만)
-    if re.fullmatch(
-        r'[가-힣]{2,4}\s+(?:\d{1,2}\s*월|이번달|지난달|이번주|저번주|지난주|오늘|어제|\d{1,2}[/.]\d{1,2})'
-        r'\s*(?:미리보기|보여줘|보여주세요|캡처|이미지로?)?', low
-    ):
+    _period = (r'(?:\d{1,2}\s*월|이번달|지난달|이번주|저번주|지난주|오늘|어제|\d{1,2}[/.]\d{1,2})'
+               r'\s*(?:미리보기|보여줘|보여주세요|캡처|이미지로?)?')
+    if re.fullmatch(r'[가-힣]{2,4}\s+' + _period, low):
+        return await cmd_preview(update, context)
+    # '중1AB 이번주', '초5 7/15' 처럼 반+기간만 온 경우도 미리보기로
+    if re.fullmatch(r'(?:초|중|고)\d[a-zA-Z]*(?:\([^)]*\))?\s+' + _period, low):
         return await cmd_preview(update, context)
     if low in ("생성", "새달", "새달생성"):
         return await cmd_generate(update, context)
@@ -1239,7 +1241,10 @@ async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await _preview_student(update, context, sname, ssheet, text)
     cands = _match_preview_sheet(text, latest.sheetnames)
     if not cands:
-        await update.message.reply_text("어느 반인지 알려주세요. 예) 초5 7월 15일 미리보기")
+        await update.message.reply_text(
+            "그 반을 못 찾았어요. 출석부에 있는 반: " + ", ".join(latest.sheetnames)
+            + "\n예) 초5 7월 15일 미리보기"
+        )
         return
     if len(cands) > 1:
         await update.message.reply_text("어느 반인지 콕 집어주세요: " + ", ".join(cands))
