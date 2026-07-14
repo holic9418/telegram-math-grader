@@ -145,76 +145,77 @@ def _capture_template(ws, start, last_col):
             'last_col': last_col, 'label_font': label_font}
 
 
+def regenerate_month_sheet(ws, year, month, weekday_idxs, hol=None):
+    """한 시트의 날짜 블록을 (year,month) 수업요일에 맞게 새로 채운다.
+       학생 열/헤더/서식은 유지하고 값만 비운다. 공휴일은 병합+빨강."""
+    if hol is None:
+        hol = holidays_for(year)
+    start = _find_start_row(ws)
+    if start is None:
+        return
+    last_col = _last_col(ws, start)
+    tpl = _capture_template(ws, start, last_col)
+    days = class_days(year, month, weekday_idxs)
+
+    # 1) 블록 영역(>= start)의 기존 병합 모두 해제
+    for rng in list(ws.merged_cells.ranges):
+        if rng.max_row >= start:
+            ws.unmerge_cells(str(rng))
+
+    # 2) 블록 영역 값 비우기 (넉넉히)
+    max_clear = start + BLOCK_SIZE * (len(days) + 4)
+    for r in range(start, max(max_clear, ws.max_row) + 1):
+        for c in range(1, last_col + 1):
+            ws.cell(r, c).value = None
+
+    # 3) 새 블록 기록
+    for i, d in enumerate(days):
+        top = start + BLOCK_SIZE * i
+        for k in range(BLOCK_SIZE):
+            r = top + k
+            for c in range(1, last_col + 1):
+                ws.cell(r, c)._style = copy(tpl['styles'][k][c])
+                _strip_diagonal(ws.cell(r, c))
+            if tpl['heights'][k] is not None:
+                ws.row_dimensions[r].height = tpl['heights'][k]
+            ws.cell(r, 2).value = BLOCK_LABELS[k]
+        ws.cell(top, 1).value = f'{d.month}/{d.day}'
+        ws.merge_cells(start_row=top, start_column=1, end_row=top + BLOCK_SIZE - 1, end_column=1)
+        if d in hol:
+            ws.merge_cells(start_row=top, start_column=3,
+                           end_row=top + BLOCK_SIZE - 1, end_column=last_col)
+            cell = ws.cell(top, 3)
+            cell.value = hol[d]
+            base = tpl['label_font']
+            cell.font = Font(name=base.name, size=base.sz, bold=True, color='FFFF0000')
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+        else:
+            for rel in MERGE_LABEL_ROWS:
+                for (g0, g1) in tpl['groups']:
+                    if g1 > g0:
+                        ws.merge_cells(start_row=top + rel, start_column=g0,
+                                       end_row=top + rel, end_column=g1)
+
+    # 4) 마지막 블록 아래 잔여 영역 비우기
+    last_end = start + BLOCK_SIZE * len(days) - 1
+    for r in range(last_end + 1, ws.max_row + 1):
+        ws.row_dimensions[r].height = None
+        for c in range(1, last_col + 1):
+            cell = ws.cell(r, c)
+            cell.value = None
+            cell.border = Border()
+
+
 def generate_month(src_workbook, year, month, schedules=None):
     """src_workbook(Workbook) 을 바탕으로 새 달 Workbook 을 만들어 반환.
        schedules: {sheet_name: [weekday_idx,...]} 없으면 기존 파일에서 추론."""
     wb = src_workbook
     hol = holidays_for(year)
     schedules = schedules or {}
-
     for name in wb.sheetnames:
         ws = wb[name]
-        start = _find_start_row(ws)
-        if start is None:
-            continue
-        last_col = _last_col(ws, start)
-        tpl = _capture_template(ws, start, last_col)
-
         wds = schedules.get(name) or infer_schedule(ws)
-        days = class_days(year, month, wds)
-
-        # 1) 블록 영역(>= start)의 기존 병합 모두 해제
-        for rng in list(ws.merged_cells.ranges):
-            if rng.max_row >= start:
-                ws.unmerge_cells(str(rng))
-
-        # 2) 블록 영역 값 비우기 (넉넉히)
-        max_clear = start + BLOCK_SIZE * (len(days) + 4)
-        for r in range(start, max(max_clear, ws.max_row) + 1):
-            for c in range(1, last_col + 1):
-                ws.cell(r, c).value = None
-
-        # 3) 새 블록 기록
-        for i, d in enumerate(days):
-            top = start + BLOCK_SIZE * i
-            # 스타일/행높이 적용 (지난달 결석 표시인 대각선은 제거)
-            for k in range(BLOCK_SIZE):
-                r = top + k
-                for c in range(1, last_col + 1):
-                    ws.cell(r, c)._style = copy(tpl['styles'][k][c])
-                    _strip_diagonal(ws.cell(r, c))
-                if tpl['heights'][k] is not None:
-                    ws.row_dimensions[r].height = tpl['heights'][k]
-                ws.cell(r, 2).value = BLOCK_LABELS[k]
-            # 날짜 (A열, 세로 병합)
-            ws.cell(top, 1).value = f'{d.month}/{d.day}'
-            ws.merge_cells(start_row=top, start_column=1, end_row=top + BLOCK_SIZE - 1, end_column=1)
-
-            if d in hol:
-                # 공휴일: 입력칸(C..last) 5행 병합 후 이름 빨강
-                ws.merge_cells(start_row=top, start_column=3,
-                               end_row=top + BLOCK_SIZE - 1, end_column=last_col)
-                cell = ws.cell(top, 3)
-                cell.value = hol[d]
-                base = tpl['label_font']
-                cell.font = Font(name=base.name, size=base.sz, bold=True, color='FFFF0000')
-                cell.alignment = Alignment(horizontal='center', vertical='center')
-            else:
-                # 평일: 수업내용·다음과제 행을 반(CLASS)별 한 칸으로 병합
-                for rel in MERGE_LABEL_ROWS:
-                    for (g0, g1) in tpl['groups']:
-                        if g1 > g0:
-                            ws.merge_cells(start_row=top + rel, start_column=g0,
-                                           end_row=top + rel, end_column=g1)
-
-        # 4) 마지막 블록 아래 잔여 영역 비우기 (지난달이 더 길었던 경우)
-        last_end = start + BLOCK_SIZE * len(days) - 1
-        for r in range(last_end + 1, ws.max_row + 1):
-            ws.row_dimensions[r].height = None
-            for c in range(1, last_col + 1):
-                cell = ws.cell(r, c)
-                cell.value = None
-                cell.border = Border()
+        regenerate_month_sheet(ws, year, month, wds, hol)
     return wb
 
 
@@ -276,10 +277,10 @@ ROW_OFFSET = {'출석': 0, '수업내용': 1, '과제수행': 2, '다음과제':
 
 # 반별 수업 요일 기본값 (요일 인덱스: 월0~일6)
 DEFAULT_SCHEDULES = {
-    '초3': [1, 2, 3], '초4': [0, 2, 4], '초5': [1, 2, 3], '초5A': [1, 2, 3],
-    '초6': [0, 2, 4], '초6A': [0, 2, 4], '중1AB': [0, 2, 4], '중1C': [0, 2, 4],
+    '초3': [1, 2, 3], '초4': [0, 2, 4], '초5A': [1, 2, 3], '초5B': [1, 2, 3],
+    '초6A': [0, 2, 4], '초6B': [0, 2, 4], '중1AB': [0, 2, 4], '중1C': [0, 2, 4],
     '중1보충': [0, 4], '중2': [1, 2, 3], '중3': [0, 2, 4],
-    '고1': [1, 3, 5], '고2(미적분)': [1, 3, 5], '고3': [0, 2, 4],
+    '고1': [1, 3, 5], '고2': [1, 3, 5], '고3': [0, 2, 4],
 }
 
 # 반별 '출석 입력 확인' 시각 = 수업 종료 15분 뒤. {반: {요일idx(str): 'HH:MM'}}
@@ -287,17 +288,17 @@ DEFAULT_SCHEDULES = {
 DEFAULT_CLASS_TIMES = {
     '초3': {'1': '17:15', '2': '15:15', '3': '15:15'},          # 화 4~5시 / 수목 2~3시
     '초4': {'0': '15:15', '2': '15:15', '4': '15:15'},          # 월수금 2~3시
-    '초5': {'1': '16:15', '2': '16:15', '3': '16:15'},          # 화수목 3~4시
     '초5A': {'1': '16:15', '2': '16:15', '3': '16:15'},         # 화수목 3~4시
-    '초6': {'0': '16:15', '2': '16:15', '4': '16:15'},          # 월수금 3~4시
+    '초5B': {'1': '16:15', '2': '16:15', '3': '16:15'},         # 화수목 3~4시
     '초6A': {'0': '16:15', '2': '16:15', '4': '16:15'},         # 월수금 3~4시
+    '초6B': {'0': '16:15', '2': '16:15', '4': '16:15'},         # 월수금 3~4시
     '중1AB': {'0': '20:15', '4': '20:15', '2': '19:15'},        # 월금 6~8시 / 수 6~7시
     '중1C': {'0': '20:15', '4': '20:15', '2': '19:15'},         # 월금 6~8시 / 수 6~7시
     '중1보충': {'0': '18:15', '4': '18:15'},                    # 월금 5~6시
     '중2': {'1': '18:15', '3': '18:15', '2': '17:15'},          # 화목 4~6시 / 수 4~5시
     '중3': {'0': '18:15', '4': '18:15', '2': '18:15'},          # 월금 4~6시 / 수 5~6시
     '고1': {'1': '22:15', '3': '22:15', '5': '12:15'},          # 화목 8~10시 / 토 10~12시
-    '고2(미적분)': {'1': '20:15', '3': '20:15', '5': '14:15'},  # 화목 6~8시 / 토 12~2시
+    '고2': {'1': '20:15', '3': '20:15', '5': '14:15'},          # 화목 6~8시 / 토 12~2시
     '고3': {'0': '22:15', '2': '22:15', '4': '22:15'},          # 월수금 8~10시
 }
 
@@ -492,6 +493,26 @@ def add_student(ws, name):
         ws.cell(r, new_col).value = None
     ws.cell(start - 1, new_col).value = name    # 헤더에 이름
     return new_col
+
+
+def set_roster(wb, sheet, target_names):
+    """시트의 학생 명단을 target_names(순서대로)로 맞춘다.
+       - 열 수를 늘리거나(끝 학생 서식 복사) 줄이고, 헤더에 이름을 채운다.
+       - 블록 날짜/값은 건드리지 않으므로, 새 시트는 이후 regenerate_month_sheet 로 정리."""
+    ws = wb[sheet]
+    start = _find_start_row(ws)
+    header = start - 1
+    need = len(target_names)
+    cur = sorted(get_roster(ws).items(), key=lambda x: x[1])
+    while len(cur) < need:                       # 부족 → 끝에 학생 열 추가
+        add_student(ws, f"__n{len(cur)}")
+        cur = sorted(get_roster(ws).items(), key=lambda x: x[1])
+    if len(cur) > need:                          # 남음 → 뒤쪽 열 제거
+        rebuild_without_students(wb, sheet, [nm for nm, _ in cur[need:]])
+        ws = wb[sheet]
+    # 헤더 이름을 target 으로 (열은 3부터 연속)
+    for i, nm in enumerate(target_names):
+        ws.cell(header, STUDENT_FIRST_COL + i).value = nm
 
 
 def rebuild_without_students(wb, sheet, drop_names):
