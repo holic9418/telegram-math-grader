@@ -118,6 +118,24 @@ def save_times(t):
         json.dump(t, f, ensure_ascii=False, indent=2)
 
 
+def teachers_path():
+    return os.path.join(DATA_DIR, "teachers.json")
+
+
+def load_teachers():
+    """{반이름: [chat_id, ...]} — 반별 담당 선생님(알림 수신자)."""
+    p = teachers_path()
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_teachers(t):
+    with open(teachers_path(), "w", encoding="utf-8") as f:
+        json.dump(t, f, ensure_ascii=False, indent=2)
+
+
 def chats_path():
     return os.path.join(DATA_DIR, "chats.json")
 
@@ -342,6 +360,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /출석부 : 이번 달 파일 받기 (/출석부 26.07 처럼 특정 달도)\n"
         "• /일정 : 반별 수업 요일 보기·변경\n"
         "• 알림 : 출석 입력 깜빡 방지 알림 (예: 알림 초5 21:00)\n"
+        "• 담당 : 내 담당 반 지정 (예: 담당 초5 중2) — 그 반 알림만 받기\n"
         "• /생성 : 이번 달 파일 새로 만들기\n"
         "• xlsx 파일을 보내면 저장해요\n\n"
         "매월 1일엔 자동으로 새 달 출석부를 만들어 알려드려요."
@@ -484,6 +503,74 @@ async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """반별 담당 지정. 담당으로 지정된 반의 출석 알림은 그 선생님에게만 간다."""
+    chat_id = update.effective_chat.id
+    remember_chat(chat_id)
+    teachers = load_teachers()
+    known = set(load_times()) | set(load_schedules())
+
+    # 인자 분류: 반이름들 + 해제 여부
+    remove, classes = False, []
+    for tok in context.args:
+        if tok in ("해제", "빼기", "제거", "삭제", "off", "취소"):
+            remove = True
+        else:
+            classes.append(tok)
+
+    if not context.args:  # 현재 담당 현황
+        mine = sorted(c for c, ids in teachers.items() if chat_id in ids)
+        lines = ["👤 내가 담당하는 반: " + (", ".join(mine) if mine else "없음")]
+        if teachers:
+            lines.append("\n전체 담당 현황:")
+            for c in sorted(teachers):
+                lines.append(f"• {c}: {len(teachers[c])}명 담당")
+            unassigned = sorted(known - set(teachers))
+            if unassigned:
+                lines.append("\n담당 미지정(알림이 전체에게 감): " + ", ".join(unassigned))
+        lines.append("\n지정) 담당 초5 중2    해제) 담당 초5 빼기    전체해제) 담당 해제")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    if remove and not classes:  # 모든 담당에서 빠지기
+        for c in list(teachers):
+            if chat_id in teachers[c]:
+                teachers[c].remove(chat_id)
+                if not teachers[c]:
+                    teachers.pop(c)
+        save_teachers(teachers)
+        await update.message.reply_text("✅ 모든 담당 반에서 빠졌어요. 이제 알림을 받지 않습니다.")
+        return
+
+    unknown = [c for c in classes if c not in known]
+    if unknown:
+        await update.message.reply_text(
+            f"'{', '.join(unknown)}' 반을 못 찾겠어요.\n등록된 반: {', '.join(sorted(known))}"
+        )
+        return
+
+    if remove:  # 특정 반 담당에서 빠지기
+        for c in classes:
+            if c in teachers and chat_id in teachers[c]:
+                teachers[c].remove(chat_id)
+                if not teachers[c]:
+                    teachers.pop(c)
+        save_teachers(teachers)
+        await update.message.reply_text(f"✅ {', '.join(classes)} 담당에서 빠졌어요.")
+        return
+
+    for c in classes:  # 담당 지정
+        ids = teachers.get(c, [])
+        if chat_id not in ids:
+            ids.append(chat_id)
+        teachers[c] = ids
+    save_teachers(teachers)
+    await update.message.reply_text(
+        f"✅ 이제 {', '.join(classes)} 반의 출석 알림을 받으실 거예요.\n"
+        f"(다른 반 알림은 그 반 담당 선생님에게만 갑니다.)"
+    )
+
+
 def parse_month_token(text):
     """'26.08', '26-8', '8월', '2026-08' 등에서 (year, month) 추출. 없으면 None."""
     t = str(text)
@@ -615,6 +702,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if kw in ("알림", "알람", "리마인더"):
         context.args = parts[1:]
         return await cmd_remind(update, context)
+    if kw in ("담당", "내반", "담당반"):
+        context.args = parts[1:]
+        return await cmd_teacher(update, context)
     if low in ("생성", "새달", "새달생성"):
         return await cmd_generate(update, context)
     if low in ("시작", "도움말", "도움"):
@@ -690,6 +780,7 @@ async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
         return
 
     wb, _ = load_current_wb()  # 이번 달 출석부 (없으면 None)
+    teachers = load_teachers()
     date_str = f"{now.month}/{now.day}"
     for cls, key in due:
         _sent_reminders.add(key)  # 오늘 이 반은 확인 완료 (재확인·중복발송 방지)
@@ -697,7 +788,9 @@ async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
         if wb is not None and cls in wb.sheetnames:
             recorded = ac.attendance_recorded(wb[cls], date_str)
         if recorded is False:  # 블록은 있는데 출석이 비어 있음 → 입력 안 함
-            for chat_id in known_chats():
+            # 담당 선생님이 지정돼 있으면 그분들에게만, 없으면 전체에게
+            recipients = teachers.get(cls) or known_chats()
+            for chat_id in recipients:
                 try:
                     await context.bot.send_message(
                         chat_id,
@@ -741,6 +834,7 @@ def main():
     app.add_handler(CommandHandler("download", cmd_download))
     app.add_handler(CommandHandler("schedule", cmd_schedule))
     app.add_handler(CommandHandler("remind", cmd_remind))
+    app.add_handler(CommandHandler("teacher", cmd_teacher))
     app.add_handler(CommandHandler("generate", cmd_generate))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
