@@ -184,6 +184,52 @@ def is_admin(chat_id):
     return a is not None and a == chat_id
 
 
+# ── 승인 멤버(사용 권한) ───────────────────────────────────────
+def members_path():
+    return os.path.join(DATA_DIR, "members.json")
+
+
+def load_members():
+    """{str(chat_id): {'name','status'}} — status: approved|pending."""
+    p = members_path()
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_members(m):
+    with open(members_path(), "w", encoding="utf-8") as f:
+        json.dump(m, f, ensure_ascii=False, indent=2)
+
+
+def is_approved(chat_id):
+    if is_admin(chat_id):
+        return True
+    m = load_members().get(str(chat_id))
+    return bool(m) and m.get("status") == "approved"
+
+
+def register_pending(chat_id, name):
+    """미등록 사용자를 대기 상태로 기록. 새로 추가되면 True."""
+    m = load_members()
+    key = str(chat_id)
+    if key in m:
+        return False
+    m[key] = {"name": name or "이름미상", "status": "pending"}
+    save_members(m)
+    return True
+
+
+def _find_member_key(m, arg):
+    """arg(이름 또는 chat_id)로 멤버 키 찾기."""
+    arg = str(arg).strip()
+    if arg in m:
+        return arg
+    hits = [k for k, v in m.items() if v.get("name") == arg]
+    return hits[0] if len(hits) == 1 else None
+
+
 def enroll_path():
     return os.path.join(DATA_DIR, "enrollments.json")
 
@@ -730,12 +776,115 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if a is None:
         set_admin(chat_id)
         await update.message.reply_text(
-            "✅ 관리자로 등록됐어요.\n이제 '설정초기화'와 '주간보고서'는 관리자(당신)만 사용/수신합니다."
+            "✅ 관리자로 등록됐어요.\n\n"
+            "관리자 전용 기능:\n"
+            "• '설정초기화', '주간보고서' — 관리자만\n"
+            "• 승인 관리: 다른 쌤이 처음 쓰려 하면 승인 요청이 와요.\n"
+            "   - <b>승인</b> : 대기 목록 보기 / <b>승인 이름</b> 또는 <b>승인 번호</b> : 승인\n"
+            "   - <b>박탈 이름/번호</b> : 사용 권한 회수 / <b>멤버</b> : 승인된 명단",
+            parse_mode="HTML",
         )
     elif a == chat_id:
         await update.message.reply_text("이미 관리자로 등록돼 있어요. 👍")
     else:
         await update.message.reply_text("이미 다른 분이 관리자로 등록돼 있어요.")
+
+
+async def gate_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """승인된 사용자만 통과. 미승인이면 대기 등록·관리자 알림 후 False."""
+    chat_id = update.effective_chat.id
+    if is_approved(chat_id):
+        return True
+    name = update.effective_user.full_name if update.effective_user else None
+    newly = register_pending(chat_id, name)
+    if newly:
+        admin = get_admin()
+        if admin:
+            try:
+                await context.bot.send_message(
+                    admin,
+                    f"🔔 사용 승인 요청: <b>{name or '이름미상'}</b> (id {chat_id})\n"
+                    f"허용: <code>승인 {chat_id}</code>  또는  <code>승인 {name or ''}</code>",
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                log.warning("승인요청 알림 실패: %s", e)
+        await update.message.reply_text(
+            "이 봇은 <b>승인된 선생님만</b> 사용할 수 있어요. 🔒\n"
+            "관리자에게 승인을 요청했으니 잠시만 기다려 주세요.",
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text("관리자 승인 대기 중이에요. 조금만 기다려 주세요. 🙏")
+    return False
+
+
+async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """관리자: 대기 중인 사용자 승인. 인자 없으면 대기목록."""
+    if not await require_admin(update):
+        return
+    m = load_members()
+    if not context.args:
+        pend = [(k, v["name"]) for k, v in m.items() if v.get("status") == "pending"]
+        if not pend:
+            await update.message.reply_text("승인 대기 중인 사람이 없어요.")
+            return
+        lines = ["⏳ 승인 대기 목록:"]
+        for k, nm in pend:
+            lines.append(f"• {nm} (id {k}) → 승인하려면: 승인 {k}")
+        await update.message.reply_text("\n".join(lines))
+        return
+    key = _find_member_key(m, " ".join(context.args))
+    if not key or m.get(key, {}).get("status") is None:
+        await update.message.reply_text("그런 대기자를 못 찾았어요. '승인' 만 보내 목록을 확인하세요.")
+        return
+    m[key]["status"] = "approved"
+    save_members(m)
+    await update.message.reply_text(f"✅ {m[key]['name']} 님을 승인했어요. 이제 사용할 수 있어요.")
+    try:
+        await context.bot.send_message(int(key), "✅ 관리자 승인이 완료됐어요! 이제 출석부 봇을 쓸 수 있어요. 😊")
+    except Exception:
+        pass
+
+
+async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """관리자: 사용 권한 박탈."""
+    if not await require_admin(update):
+        return
+    m = load_members()
+    if not context.args:
+        appr = [(k, v["name"]) for k, v in m.items() if v.get("status") == "approved"]
+        lines = ["👥 승인된 멤버:"] + [f"• {nm} (id {k})" for k, nm in appr] if appr else ["승인된 멤버가 없어요."]
+        lines.append("\n박탈하려면: 박탈 <이름 또는 번호>")
+        await update.message.reply_text("\n".join(lines))
+        return
+    key = _find_member_key(m, " ".join(context.args))
+    if not key:
+        await update.message.reply_text("그런 멤버를 못 찾았어요.")
+        return
+    nm = m[key]["name"]
+    m.pop(key)
+    save_members(m)
+    await update.message.reply_text(f"🚫 {nm} 님의 사용 권한을 박탈했어요.")
+    try:
+        await context.bot.send_message(int(key), "안내: 출석부 봇 사용 권한이 해제되었어요.")
+    except Exception:
+        pass
+
+
+async def cmd_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """관리자: 승인/대기 멤버 목록."""
+    if not await require_admin(update):
+        return
+    m = load_members()
+    appr = [v["name"] for v in m.values() if v.get("status") == "approved"]
+    pend = [(k, v["name"]) for k, v in m.items() if v.get("status") == "pending"]
+    lines = [f"👥 승인된 멤버 ({len(appr)}): " + (", ".join(appr) if appr else "없음")]
+    if pend:
+        lines.append("\n⏳ 승인 대기:")
+        for k, nm in pend:
+            lines.append(f"• {nm} → 승인 {k}")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_reset_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -807,6 +956,8 @@ async def cmd_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── 파일 업로드(시드) ──────────────────────────────────────────
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await gate_member(update, context):
+        return
     doc = update.message.document
     if not doc.file_name.lower().endswith(".xlsx"):
         await update.message.reply_text("xlsx 파일만 저장할 수 있어요.")
@@ -845,6 +996,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     low = text.lstrip("/").strip()
     parts = low.split()
     kw = parts[0] if parts else ""
+
+    # 승인된 멤버만 사용 가능 (관리자 등록만 예외로 통과)
+    if low not in ("관리자등록", "관리자", "관리자설정") and not await gate_member(update, context):
+        return
 
     # 확인/취소 대기 처리 (확인 뒤에 추가 정보가 붙어도 인식하고 병합)
     if chat_id in pending:
@@ -903,6 +1058,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_teacher(update, context)
     if low in ("관리자등록", "관리자", "관리자설정"):
         return await cmd_admin(update, context)
+    if kw in ("승인",):
+        context.args = parts[1:]
+        return await cmd_approve(update, context)
+    if kw in ("박탈", "권한박탈", "차단"):
+        context.args = parts[1:]
+        return await cmd_revoke(update, context)
+    if low in ("멤버", "명단", "멤버목록", "대기", "대기목록"):
+        return await cmd_members(update, context)
     if low in ("설정초기화", "기본설정복원", "반목록갱신"):
         return await cmd_reset_config(update, context)
     if low in ("주간보고서", "보고서", "주간출결"):
