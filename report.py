@@ -69,7 +69,19 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
 
     pad = 8 * scale
     date_w = int(max(tw("00/00"), 40 * scale)) + pad * 2
-    label_w = int(max(tw(l) for l in LABELS)) + pad * 2
+
+    def block_label(top, k):
+        """블록의 실제 B열 라벨(비고→일일test 등 반영). 없으면 기본 LABELS."""
+        v = ws.cell(top + k, 2).value if top else None
+        return str(v) if v not in (None, "") else LABELS[k]
+
+    # 라벨 열 너비: 기본 라벨 + 이번 주 블록들의 실제 라벨 중 최대
+    all_labels = list(LABELS)
+    for _d in dates:
+        _t = ac.find_date_block(ws, _d)
+        if _t:
+            all_labels += [block_label(_t, k) for k in range(5)]
+    label_w = int(max(tw(l) for l in all_labels)) + pad * 2
     # 학생 열 너비: 이름/값 중 최대 (수업내용·다음과제 제외 = 병합)
     stu_w = []
     for name, col in roster:
@@ -123,7 +135,7 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
         for k, lab in enumerate(LABELS):
             ry = y + k * row_h
             rowbg = CREAM if lab == '출석' else WHITE
-            cell(date_w, ry, label_w, row_h, lab, rowbg)
+            cell(date_w, ry, label_w, row_h, block_label(top, k), rowbg)
             if lab in ('수업내용', '다음과제'):
                 # 학생 영역 전체에 하나로
                 val = ws.cell(top + ac.ROW_OFFSET[lab], ac.STUDENT_FIRST_COL).value if top else None
