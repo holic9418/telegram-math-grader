@@ -137,6 +137,24 @@ def save_teachers(t):
         json.dump(t, f, ensure_ascii=False, indent=2)
 
 
+def report_to_path():
+    return os.path.join(DATA_DIR, "report_to.json")
+
+
+def get_report_to():
+    """주간 보고서 수신자 chat_id (없으면 None)."""
+    p = report_to_path()
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            return json.load(f).get("chat_id")
+    return None
+
+
+def set_report_to(chat_id):
+    with open(report_to_path(), "w", encoding="utf-8") as f:
+        json.dump({"chat_id": chat_id}, f)
+
+
 def enroll_path():
     return os.path.join(DATA_DIR, "enrollments.json")
 
@@ -925,17 +943,20 @@ def generate_weekly_report(target=None):
 
 
 async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    remember_chat(update.effective_chat.id)
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_document")
+    chat_id = update.effective_chat.id
+    remember_chat(chat_id)
+    first_time = get_report_to() is None
+    set_report_to(chat_id)  # 이 채팅을 주간 보고서 수신자로 등록(자동 전송 대상)
+    await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
     out, n = generate_weekly_report()
     if not out:
         await update.message.reply_text("이번 주 출결 데이터가 있는 출석부 파일을 찾지 못했어요.")
         return
+    cap = f"📄 주간 출결 보고서 · {n}개 반"
+    if first_time:
+        cap += "\n(이제 매주 일요일 보고서는 이 채팅으로만 전송돼요.)"
     with open(out, "rb") as f:
-        await update.message.reply_document(
-            document=f, filename=os.path.basename(out),
-            caption=f"📄 주간 출결 보고서 · {n}개 반"
-        )
+        await update.message.reply_document(document=f, filename=os.path.basename(out), caption=cap)
 
 
 # 이번 주 보고서를 이미 보냈는지 (ISO 주 기준)
@@ -956,7 +977,9 @@ async def report_job(context: ContextTypes.DEFAULT_TYPE):
     if not out:
         log.info("주간 보고서: 이번 주 데이터 없음")
         return
-    for chat_id in known_chats():
+    to = get_report_to()
+    recipients = [to] if to else known_chats()  # 지정 수신자에게만(없으면 전체)
+    for chat_id in recipients:
         try:
             with open(out, "rb") as f:
                 await context.bot.send_document(

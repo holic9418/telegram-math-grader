@@ -121,12 +121,12 @@ def render_class_table(cls_name, ws, dates, scale=2):
         for k, lab in enumerate(LABELS):
             ry = y + k * row_h
             rowbg = CREAM if lab == '출석' else WHITE
-            cell(date_w, ry, label_w, row_h, lab, rowbg, align="left")
+            cell(date_w, ry, label_w, row_h, lab, rowbg)
             if lab in ('수업내용', '다음과제'):
                 # 학생 영역 전체에 하나로
                 val = ws.cell(top + ac.ROW_OFFSET[lab], ac.STUDENT_FIRST_COL).value if top else None
                 x0 = date_w + label_w
-                cell(x0, ry, sum(stu_w), row_h, val, WHITE, align="left")
+                cell(x0, ry, sum(stu_w), row_h, val, WHITE)
             else:
                 x = date_w + label_w
                 for (name, col), w in zip(roster, stu_w):
