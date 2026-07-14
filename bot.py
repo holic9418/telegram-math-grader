@@ -34,6 +34,7 @@ from telegram.ext import (
 )
 
 import attendance_core as ac
+import report as rpt
 
 # ── 설정 ───────────────────────────────────────────────────────
 load_dotenv()
@@ -411,6 +412,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /일정 : 반별 수업 요일 보기·변경\n"
         "• 알림 : 출석 입력 깜빡 방지 알림 (예: 알림 초5 21:00)\n"
         "• 담당 : 내 담당 반 지정 (예: 담당 초5 중2) — 그 반 알림만 받기\n"
+        "• 주간보고서 : 이번 주 출결 보고서 PDF 받기 (매주 일요일 자동 전송)\n"
         "• /생성 : 이번 달 파일 새로 만들기\n"
         "• xlsx 파일을 보내면 저장해요\n\n"
         "매월 1일엔 자동으로 새 달 출석부를 만들어 알려드려요."
@@ -780,6 +782,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_teacher(update, context)
     if low in ("설정초기화", "기본설정복원", "반목록갱신"):
         return await cmd_reset_config(update, context)
+    if low in ("주간보고서", "보고서", "주간출결"):
+        return await cmd_report(update, context)
     if low in ("생성", "새달", "새달생성"):
         return await cmd_generate(update, context)
     if low in ("시작", "도움말", "도움"):
@@ -902,6 +906,67 @@ async def monthly_job(context: ContextTypes.DEFAULT_TYPE):
             log.warning("알림 실패 %s: %s", chat_id, e)
 
 
+# ── 주간 출결 보고서 ───────────────────────────────────────────
+def generate_weekly_report(target=None):
+    """target(기본 오늘)이 속한 주(월~일) 보고서 PDF 생성. 반환: (경로, 반수)|(None,0)."""
+    today = target or datetime.datetime.now(KST).date()
+    monday, sunday = rpt.week_bounds(today)
+    p = month_path(sunday.year, sunday.month)  # 일요일이 속한 달 파일
+    if not os.path.exists(p):
+        f = latest_month_file()
+        if not f:
+            return None, 0
+        p = os.path.join(DATA_DIR, f)
+    wb = ac.load_workbook(p)
+    fname = f"수학과 주간 출결사항 ({monday.month}.{monday.day}~{sunday.month}.{sunday.day}).pdf"
+    out = os.path.join(DATA_DIR, fname)
+    n = rpt.build_report_pdf(wb, out, monday, sunday, sunday.year)
+    return (out, n) if n else (None, 0)
+
+
+async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    remember_chat(update.effective_chat.id)
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_document")
+    out, n = generate_weekly_report()
+    if not out:
+        await update.message.reply_text("이번 주 출결 데이터가 있는 출석부 파일을 찾지 못했어요.")
+        return
+    with open(out, "rb") as f:
+        await update.message.reply_document(
+            document=f, filename=os.path.basename(out),
+            caption=f"📄 주간 출결 보고서 · {n}개 반"
+        )
+
+
+# 이번 주 보고서를 이미 보냈는지 (ISO 주 기준)
+_last_report_week = {"key": None}
+
+
+async def report_job(context: ContextTypes.DEFAULT_TYPE):
+    """매주 일요일 18:00(KST)에 주간 출결 보고서를 만들어 전송."""
+    now = datetime.datetime.now(KST)
+    if now.weekday() != 6 or not (now.hour == 18 and now.minute < 3):
+        return
+    iso = now.isocalendar()
+    key = (iso[0], iso[1])
+    if _last_report_week["key"] == key:
+        return
+    _last_report_week["key"] = key
+    out, n = generate_weekly_report(now.date())
+    if not out:
+        log.info("주간 보고서: 이번 주 데이터 없음")
+        return
+    for chat_id in known_chats():
+        try:
+            with open(out, "rb") as f:
+                await context.bot.send_document(
+                    chat_id, document=f, filename=os.path.basename(out),
+                    caption=f"📄 이번 주 출결 보고서 · {n}개 반"
+                )
+        except Exception as e:
+            log.warning("주간 보고서 전송 실패 %s: %s", chat_id, e)
+
+
 # ── 실행 ──────────────────────────────────────────────────────
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
@@ -915,6 +980,7 @@ def main():
     app.add_handler(CommandHandler("remind", cmd_remind))
     app.add_handler(CommandHandler("teacher", cmd_teacher))
     app.add_handler(CommandHandler("resetconfig", cmd_reset_config))
+    app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("generate", cmd_generate))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -925,7 +991,9 @@ def main():
         app.job_queue.run_once(monthly_job, when=10)
         # 1분마다 출석 입력 알림 확인 (한국시간 기준)
         app.job_queue.run_repeating(reminder_job, interval=60, first=15)
-        log.info("월간 자동 생성 + 출석 입력 알림 스케줄 등록됨")
+        # 매주 일요일 18:00(KST) 주간 출결 보고서
+        app.job_queue.run_repeating(report_job, interval=60, first=25)
+        log.info("월간 생성 + 출석 알림 + 주간 보고서 스케줄 등록됨")
     else:
         log.warning("job_queue 미설치 — 자동 생성/알림 비활성 (requirements 확인)")
 
