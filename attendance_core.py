@@ -376,10 +376,16 @@ COLOR_BLUE = 'FF0000FF'
 COLOR_BLACK = 'FF000000'
 
 
+def _is_late(value):
+    """지각 값인지: '지각' 이 있거나 'N분'(지각시간) 형식이면 지각."""
+    s = str(value)
+    return '지각' in s or bool(re.search(r'\d+\s*분', s))
+
+
 def _attendance_color(value):
     """출석 값 → 글자색. 결석=빨강, 지각·조퇴=파랑, 정상=검정."""
     s = str(value)
-    if '지각' in s or '조퇴' in s:
+    if _is_late(s) or '조퇴' in s:
         return COLOR_BLUE
     if '결석' in s or '결' == s.strip() or 'X' in s.upper():
         return COLOR_RED
@@ -390,7 +396,7 @@ def is_absent(value):
     """출석 값이 '결석'인지 판단한다 (지각·조퇴는 수업 참석으로 보아 제외).
     결석이면 그 학생의 과제수행·비고 칸을 비운다."""
     s = str(value)
-    if '지각' in s or '조퇴' in s:
+    if _is_late(s) or '조퇴' in s:
         return False
     return 'X' in s.upper()
 
