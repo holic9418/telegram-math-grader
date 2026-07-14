@@ -527,7 +527,7 @@ async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"• {c}: {len(teachers[c])}명 담당")
             unassigned = sorted(known - set(teachers))
             if unassigned:
-                lines.append("\n담당 미지정(알림이 전체에게 감): " + ", ".join(unassigned))
+                lines.append("\n담당 미지정(알림 안 감): " + ", ".join(unassigned))
         lines.append("\n지정) 담당 초5 중2    해제) 담당 초5 빼기    전체해제) 담당 해제")
         await update.message.reply_text("\n".join(lines))
         return
@@ -568,6 +568,23 @@ async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ 이제 {', '.join(classes)} 반의 출석 알림을 받으실 거예요.\n"
         f"(다른 반 알림은 그 반 담당 선생님에게만 갑니다.)"
+    )
+
+
+async def cmd_reset_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """반 목록·수업요일·알림 시간표를 코드 기본값으로 다시 맞춘다.
+    (반 구성이 바뀐 뒤 한 번 실행. 담당 지정은 그대로 둔다.)"""
+    remember_chat(update.effective_chat.id)
+    for p in (schedules_path(), times_path()):
+        if os.path.exists(p):
+            os.remove(p)
+    load_schedules()
+    load_times()
+    classes = ", ".join(sorted(load_times()))
+    await update.message.reply_text(
+        "✅ 반 목록·수업요일·알림 시간표를 기본값으로 새로 맞췄어요.\n"
+        f"등록된 반: {classes}\n\n"
+        "이제 담당 반을 지정하세요. 예) 담당 초5A 초6A 중1AB 중2 중3 고1 고2(미적분) 고3"
     )
 
 
@@ -705,6 +722,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if kw in ("담당", "내반", "담당반"):
         context.args = parts[1:]
         return await cmd_teacher(update, context)
+    if low in ("설정초기화", "기본설정복원", "반목록갱신"):
+        return await cmd_reset_config(update, context)
     if low in ("생성", "새달", "새달생성"):
         return await cmd_generate(update, context)
     if low in ("시작", "도움말", "도움"):
@@ -788,8 +807,12 @@ async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
         if wb is not None and cls in wb.sheetnames:
             recorded = ac.attendance_recorded(wb[cls], date_str)
         if recorded is False:  # 블록은 있는데 출석이 비어 있음 → 입력 안 함
-            # 담당 선생님이 지정돼 있으면 그분들에게만, 없으면 전체에게
-            recipients = teachers.get(cls) or known_chats()
+            # 담당 지정이 하나라도 있으면 그 반 담당에게만(미지정=발송 안 함),
+            # 아직 담당을 아무도 안 정했으면 전체에게(초기 편의)
+            if teachers:
+                recipients = teachers.get(cls, [])
+            else:
+                recipients = known_chats()
             for chat_id in recipients:
                 try:
                     await context.bot.send_message(
@@ -835,6 +858,7 @@ def main():
     app.add_handler(CommandHandler("schedule", cmd_schedule))
     app.add_handler(CommandHandler("remind", cmd_remind))
     app.add_handler(CommandHandler("teacher", cmd_teacher))
+    app.add_handler(CommandHandler("resetconfig", cmd_reset_config))
     app.add_handler(CommandHandler("generate", cmd_generate))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
