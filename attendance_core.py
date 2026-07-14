@@ -9,6 +9,7 @@ import io, re, zipfile, datetime, calendar
 from copy import copy
 import openpyxl
 from openpyxl.styles import Font, Alignment, Border
+from openpyxl.cell.cell import MergedCell
 import holidays as _holidays
 
 WEEKDAY_KR = ['월', '화', '수', '목', '금', '토', '일']
@@ -573,6 +574,9 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
             warnings.append(f"학적: '{st}' 학생을 못 찾음")
             continue
         cell = ws.cell(top + ROW_OFFSET['출석'], roster[st])
+        if isinstance(cell, MergedCell):
+            warnings.append(f"학적: '{st}' 칸이 병합돼 있어 건너뜀")
+            continue
         cell.value = mark
         _apply_font_color(cell, _attendance_color(mark))
         written.append(f"학적 · {st} → {mark}")
@@ -585,6 +589,8 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
     for st in absent:
         for label in ('과제수행', '비고'):
             cell = ws.cell(top + ROW_OFFSET[label], roster[st])
+            if isinstance(cell, MergedCell):
+                continue
             cell.value = None
             _apply_font_color(cell, COLOR_BLACK)
 
@@ -594,6 +600,9 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
             warnings.append(f"{label}: '{student}' 학생을 못 찾음")
             return
         cell = ws.cell(r, roster[student])
+        if isinstance(cell, MergedCell):
+            warnings.append(f"{label}: '{student}' 칸이 병합돼 있어 건너뜀(전출 등)")
+            return
         cell.value = value
         if label == '출석':
             _apply_font_color(cell, _attendance_color(value))

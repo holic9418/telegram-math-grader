@@ -478,8 +478,9 @@ Zest 수학과 선생님들이 함께 쓰는 출석부예요.
 • 시험: 시험 이름과 학생·점수를 말씀해 주시면, 파일에 자동으로 기록됩니다.
    예) <code>초5 오늘 일일테스트 우현 규림 둘다 75점</code>
 
-<b>3) 파일 받기</b>
+<b>3) 파일·미리보기 받기</b>
 • <b>출석부</b> 라고 보내면 이번 달 파일을, <b>출석부 7월</b> 이면 특정 달 파일을 보내드려요.
+• <b>초5 7월 15일 미리보기</b> 처럼 반+날짜를 주시면, 그 부분만 <b>이미지로</b> 보여드려요. (전체 파일 안 받아도 돼요)
 
 <b>4) 내 담당 반 지정</b> (중요!)
 • <b>담당 초5 중2</b> 처럼 보내주시면, 그 반 알림만 받게 됩니다.
@@ -903,6 +904,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_reset_config(update, context)
     if low in ("주간보고서", "보고서", "주간출결"):
         return await cmd_report(update, context)
+    if any(k in low for k in ("미리보기", "캡처", "보여줘", "보여주", "이미지로")):
+        return await cmd_preview(update, context)
     if low in ("생성", "새달", "새달생성"):
         return await cmd_generate(update, context)
     if low in ("시작", "도움말", "도움"):
@@ -1113,6 +1116,100 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
             document=f, filename=os.path.basename(out),
             caption=f"📄 주간 출결 보고서 · {n}개 반"
         )
+
+
+# ── 특정 날짜·반 미리보기(이미지) ──────────────────────────────
+def _match_preview_sheet(text, sheets):
+    """텍스트에서 반 시트명 찾기. 반환: 후보 리스트(정확히 1개면 확정)."""
+    t = text.replace(" ", "")
+    for s in sorted(sheets, key=len, reverse=True):  # '초5A'가 '초5'보다 먼저
+        if s.replace(" ", "") in t:
+            return [s]
+    m = re.search(r'(초|중|고)\d[A-Za-z]*', t)  # '고2' → '고2(미적분)', '중1' → 여러 개
+    if m:
+        tok = m.group(0)
+        return [s for s in sheets if s.replace(" ", "").startswith(tok)]
+    return []
+
+
+def _resolve_preview_date(text):
+    """텍스트에서 날짜 추출. 오늘/어제/내일/'M월 D일'/'M/D' 지원."""
+    today = datetime.datetime.now(KST).date()
+    if '오늘' in text:
+        return today
+    if '어제' in text:
+        return today - datetime.timedelta(days=1)
+    if '내일' in text:
+        return today + datetime.timedelta(days=1)
+    m = re.search(r'(\d{1,2})\s*월\s*(\d{1,2})', text) or re.search(r'(\d{1,2})[/.](\d{1,2})', text)
+    if m:
+        try:
+            return datetime.date(today.year, int(m.group(1)), int(m.group(2)))
+        except ValueError:
+            return None
+    return None
+
+
+async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'초5 7월 15일 미리보기'처럼 반+날짜를 주면 그 부분만 이미지로 보낸다."""
+    chat_id = update.effective_chat.id
+    remember_chat(chat_id)
+    text = update.message.text
+    latest, _ = load_latest_wb()
+    if latest is None:
+        await update.message.reply_text("아직 출석부 파일이 없어요.")
+        return
+    cands = _match_preview_sheet(text, latest.sheetnames)
+    if not cands:
+        await update.message.reply_text("어느 반인지 알려주세요. 예) 초5 7월 15일 미리보기")
+        return
+    if len(cands) > 1:
+        await update.message.reply_text("어느 반인지 콕 집어주세요: " + ", ".join(cands))
+        return
+    sheet = cands[0]
+
+    # 이번주/저번주면 그 주 전체, 아니면 특정 날짜
+    base = None
+    if any(k in text for k in ("이번주", "금주")):
+        base = datetime.datetime.now(KST).date()
+    elif any(k in text for k in ("저번주", "지난주")):
+        base = datetime.datetime.now(KST).date() - datetime.timedelta(days=7)
+
+    if base is not None:
+        mon, sun = rpt.week_bounds(base)
+        wb, _, _ = load_wb_for_date(f"{mon.month}/{mon.day}")
+        if wb is None:
+            wb, _ = load_latest_wb()
+        ws = wb[sheet]
+        dates = rpt.week_dates(ws, mon, sun, sun.year)
+        cap = f"📷 {sheet} · {mon.month}/{mon.day}~{sun.month}/{sun.day}"
+    else:
+        d = _resolve_preview_date(text)
+        if d is None:
+            await update.message.reply_text(
+                "날짜를 알려주세요. 예) 초5 7월 15일 미리보기 / 초5 오늘 미리보기"
+            )
+            return
+        ds = f"{d.month}/{d.day}"
+        wb, _, month = load_wb_for_date(ds)
+        if wb is None:
+            await update.message.reply_text(f"{month}월 출석부 파일이 없어요.")
+            return
+        ws = wb[sheet]
+        dates = [ds] if ac.find_date_block(ws, ds) else []
+        cap = f"📷 {sheet} · {ds}"
+
+    if not dates:
+        avail = ", ".join(ac.sheet_dates(wb).get(sheet, [])) or "없음"
+        await update.message.reply_text(f"{sheet}에 그 날짜 수업이 없어요.\n가능한 날짜: {avail}")
+        return
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+    img = rpt.render_class_table(sheet, ws, dates)
+    bio = io.BytesIO()
+    img.save(bio, "PNG")
+    bio.seek(0)
+    await update.message.reply_photo(photo=bio, caption=cap)
 
 
 # 이번 주 보고서를 이미 보냈는지 (ISO 주 기준)
