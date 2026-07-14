@@ -411,7 +411,103 @@ def _apply_font_color(cell, argb):
                      underline=f.underline, color=argb)
 
 
-def write_attendance(wb, sheet, date_str, data):
+# ── 학적 변동 (신규등록/퇴원/담당변경) ─────────────────────────
+# 출석칸에 찍는 표시
+LIFECYCLE_MARK = {'신규등록': '신규등록', '전입': '담당변경', '퇴원': '퇴원', '전출': '담당변경'}
+LIFECYCLE_ADD = {'신규등록', '전입'}   # 명단 추가 + 그 날짜부터 재적
+LIFECYCLE_END = {'퇴원', '전출'}       # 그 날짜까지만 재적(이후 빈칸)
+
+
+def _date_key(date_str):
+    try:
+        m, d = str(date_str).split('/')
+        return (int(m), int(d))
+    except Exception:
+        return None
+
+
+def student_active(enroll, student, date_str):
+    """enroll: {student: {'from':'M/D'|None,'to':'M/D'|None}}.
+    해당 날짜에 이 학생이 재적(입력 대상)인지."""
+    info = (enroll or {}).get(student)
+    if not info:
+        return True
+    dk = _date_key(date_str)
+    if dk is None:
+        return True
+    fk = _date_key(info.get('from')) if info.get('from') else None
+    tk = _date_key(info.get('to')) if info.get('to') else None
+    if fk and dk < fk:
+        return False
+    if tk and dk > tk:
+        return False
+    return True
+
+
+def add_student(ws, name):
+    """시트 명단 끝에 학생을 새 열로 추가(이웃 학생열 서식 복사). 반환: 새 열번호."""
+    start = _find_start_row(ws)
+    last_col = _last_col(ws, start)
+    new_col = last_col + 1
+    for r in range(1, ws.max_row + 1):
+        src = ws.cell(r, last_col)
+        if src.has_style:
+            ws.cell(r, new_col)._style = copy(src._style)
+    from openpyxl.utils import get_column_letter
+    sl, dl = get_column_letter(last_col), get_column_letter(new_col)
+    if sl in ws.column_dimensions and ws.column_dimensions[sl].width:
+        ws.column_dimensions[dl].width = ws.column_dimensions[sl].width
+    for r in range(start, ws.max_row + 1):      # 기존 블록 데이터는 비움
+        ws.cell(r, new_col).value = None
+    ws.cell(start - 1, new_col).value = name    # 헤더에 이름
+    return new_col
+
+
+def rebuild_without_students(wb, sheet, drop_names):
+    """sheet 에서 drop_names 학생 열을 제거한 새 시트로 교체(값·서식·병합 유지).
+    delete_cols가 병합을 깨뜨리므로 필요한 열만 복사해 재구성한다."""
+    from openpyxl.utils import get_column_letter
+    if not drop_names:
+        return
+    ws = wb[sheet]
+    roster = get_roster(ws)
+    drop_cols = {roster[n] for n in drop_names if n in roster}
+    if not drop_cols:
+        return
+    start = _find_start_row(ws)
+    last_col = _last_col(ws, start)
+    keep = [c for c in range(STUDENT_FIRST_COL, last_col + 1) if c not in drop_cols]
+    colmap = {1: 1, 2: 2}
+    for i, sc in enumerate(keep):
+        colmap[sc] = STUDENT_FIRST_COL + i
+    idx = wb.sheetnames.index(sheet)
+    dest = wb.create_sheet(sheet + "__tmp")
+    max_row = ws.max_row
+    for sc, dc in colmap.items():
+        for r in range(1, max_row + 1):
+            s = ws.cell(r, sc)
+            dest.cell(r, dc).value = s.value
+            if s.has_style:
+                dest.cell(r, dc)._style = copy(s._style)
+        sl, dl = get_column_letter(sc), get_column_letter(dc)
+        if sl in ws.column_dimensions and ws.column_dimensions[sl].width:
+            dest.column_dimensions[dl].width = ws.column_dimensions[sl].width
+    for r in range(1, max_row + 1):
+        if r in ws.row_dimensions and ws.row_dimensions[r].height is not None:
+            dest.row_dimensions[r].height = ws.row_dimensions[r].height
+    for rng in list(ws.merged_cells.ranges):
+        kept = [colmap[c] for c in range(rng.min_col, rng.max_col + 1) if c in colmap]
+        if not kept:
+            continue  # 병합이 전부 삭제열 안이면 버림
+        r0, r1, c0, c1 = rng.min_row, rng.max_row, min(kept), max(kept)
+        if r1 > r0 or c1 > c0:  # 단일 셀로 줄면 병합 불필요
+            dest.merge_cells(start_row=r0, start_column=c0, end_row=r1, end_column=c1)
+    del wb[sheet]
+    dest.title = sheet
+    wb.move_sheet(sheet, offset=idx - wb.sheetnames.index(sheet))
+
+
+def write_attendance(wb, sheet, date_str, data, enroll=None):
     """data 예:
        {'출석': {'김규림':'O','남우현':'X(결석)'},
         '수업내용': '분수의 나눗셈',
@@ -433,10 +529,28 @@ def write_attendance(wb, sheet, date_str, data):
     roster = get_roster(ws)
     written, warnings = [], []
 
+    # 학적 변동 처리: 명단 추가(신규·전입) + 출석칸에 표시
+    life = data.get('학적') or {}
+    for st, event in life.items():
+        if event in LIFECYCLE_ADD and st not in roster:
+            roster[st] = add_student(ws, st)
+            last_col = _last_col(ws, start)
+            groups = _detect_groups(ws, start, last_col)
+        mark = LIFECYCLE_MARK.get(event)
+        if not mark:
+            continue
+        if st not in roster:
+            warnings.append(f"학적: '{st}' 학생을 못 찾음")
+            continue
+        cell = ws.cell(top + ROW_OFFSET['출석'], roster[st])
+        cell.value = mark
+        _apply_font_color(cell, _attendance_color(mark))
+        written.append(f"학적 · {st} → {mark}")
+
     # 결석(지각·조퇴 제외) 학생: 과제수행·비고 칸을 비운다
     absent = {
         st for st, val in (data.get('출석') or {}).items()
-        if st in roster and is_absent(val)
+        if st in roster and st not in life and is_absent(val)
     }
     for st in absent:
         for label in ('과제수행', '비고'):
@@ -461,8 +575,14 @@ def write_attendance(wb, sheet, date_str, data):
         block = data.get(label)
         if isinstance(block, dict):
             for st, val in block.items():
+                if st in life:
+                    continue  # 학적 표시로 이미 처리한 학생
                 if label in ('과제수행', '비고') and st in absent:
                     continue  # 결석 학생의 과제·비고는 위에서 비웠으므로 건너뜀
+                if st in roster and not student_active(enroll, st, date_str):
+                    if label == '출석':
+                        warnings.append(f"{st}: 재적 기간이 아니라 건너뜀")
+                    continue  # 퇴원/전출 이후 또는 등록 전 → 빈칸 유지
                 put(label, st, val)
         elif isinstance(block, str) and block.strip():
             # 단체 문자열 → 라벨행 첫 학생칸(병합 앵커 아님)에 기록

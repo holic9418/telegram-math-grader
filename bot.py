@@ -136,6 +136,38 @@ def save_teachers(t):
         json.dump(t, f, ensure_ascii=False, indent=2)
 
 
+def enroll_path():
+    return os.path.join(DATA_DIR, "enrollments.json")
+
+
+def load_enroll():
+    """{반: {학생: {'from':'M/D'|None,'to':'M/D'|None}}} — 재적 기간."""
+    p = enroll_path()
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_enroll(e):
+    with open(enroll_path(), "w", encoding="utf-8") as f:
+        json.dump(e, f, ensure_ascii=False, indent=2)
+
+
+def apply_enroll_events(sheet, date_str, life):
+    """학적 이벤트를 enrollments.json 에 반영. life={학생: 유형}."""
+    e = load_enroll()
+    cls = e.setdefault(sheet, {})
+    for st, event in life.items():
+        info = cls.setdefault(st, {"from": None, "to": None})
+        if event in ac.LIFECYCLE_ADD:
+            info["from"] = date_str
+            info["to"] = None
+        elif event in ac.LIFECYCLE_END:
+            info["to"] = date_str
+    save_enroll(e)
+
+
 def chats_path():
     return os.path.join(DATA_DIR, "chats.json")
 
@@ -208,6 +240,12 @@ def generate_month_file(year, month):
     scheds = load_schedules()
     schedules = {k: v for k, v in scheds.items() if k in src.sheetnames}
     wb = ac.generate_month(src, year, month, schedules)
+    # 퇴원·전출(재적 to 설정) 학생은 새 달 명단에서 제거
+    enroll = load_enroll()
+    for sheet in list(wb.sheetnames):
+        drops = [st for st, info in enroll.get(sheet, {}).items() if info.get("to")]
+        if drops:
+            ac.rebuild_without_students(wb, sheet, drops)
     out = month_path(year, month)
     wb.save(out)
     log.info("생성 완료: %s (바탕: %s)", out, src_name)
@@ -227,11 +265,12 @@ PARSE_SYSTEM = """너는 학원 출석부 입력 도우미다. 선생님의 한�
   "과제수행": {"학생명": "O" 또는 "X"},
   "다음과제": "<문자열>",
   "비고":   {"학생명": "<문자열 또는 점수>"},
-  "비고라벨": "<비고 행의 이름을 바꿀 때만. 예: 일일test, 주간test, 단원평가>"
+  "비고라벨": "<비고 행의 이름을 바꿀 때만. 예: 일일test, 주간test, 단원평가>",
+  "학적": {"학생명": "신규등록" 또는 "퇴원" 또는 "전입" 또는 "전출"}
 }
 
 규칙:
-- 출석/과제 관련 입력이면 type="attendance", 그 외 잡담·질문이면 {"type":"other"} 만 출력.
+- 출석/과제/학적(신규등록·퇴원·담당변경) 관련 입력이면 type="attendance", 그 외 잡담·질문이면 {"type":"other"} 만 출력.
 - sheet 는 제공된 시트 목록 중 하나와 정확히 일치해야 한다.
 - 학생명은 제공된 명단의 이름과 정확히 일치시킨다(부분/별칭이면 가장 맞는 이름으로).
 - date 는 'M/D' 형식(예: 8/4). '오늘/어제/지난 화요일' 등은 오늘 날짜 기준으로 계산.
@@ -246,6 +285,10 @@ PARSE_SYSTEM = """너는 학원 출석부 입력 도우미다. 선생님의 한�
 - 시험/평가 관련: '비고를 ~로 바꿔줘' 처럼 비고 행 이름을 바꾸라 하면 "비고라벨"에 그 이름을 그대로 넣는다.
   (일일test, 주간test, 단원평가 등 무엇이든 사용자가 말한 이름을 그대로 사용)
   점수는 "비고"에 학생별로 넣는다(예: {"김규림":"100"}). '모두/전원 N점'이면 명단 전체에 N을 채운다(개별 언급 우선).
+- 학적 변동은 "학적"에 {학생명: 유형}으로 넣는다. 유형은 정확히 다음 중 하나:
+    "신규등록"(새 등록), "퇴원"(그만둠), "전입"('담당변경(전입)'), "전출"('담당변경(전출)').
+  · 신규등록·전입은 새 학생일 수 있으니 명단에 없어도 말한 이름을 그대로 쓴다.
+  · sheet(반)·date 는 평소처럼 채운다. 그 학생은 "출석" 등 다른 키에는 넣지 않는다.
 """
 
 
@@ -344,8 +387,15 @@ def build_preview(wb, parsed):
     if absent:
         lines.append(f"• 결석: {', '.join(sorted(absent))} → 과제수행·비고는 비워둡니다.")
 
-    if warnings:
-        lines.append("\n⚠️ 명단에 없는 이름: " + ", ".join(sorted(set(warnings))) + " (그대로 두면 무시됩니다)")
+    life = parsed.get("학적") or {}
+    if isinstance(life, dict) and life:
+        desc = {"신규등록": "신규등록·명단 추가", "전입": "담당변경(전입)·명단 추가",
+                "퇴원": "퇴원·이후 빈칸", "전출": "담당변경(전출)·이후 빈칸"}
+        lines.append("• 학적: " + ", ".join(f"{n} → {desc.get(v, v)}" for n, v in life.items()))
+
+    missing = sorted(w for w in set(warnings) if w not in life)
+    if missing:
+        lines.append("\n⚠️ 명단에 없는 이름: " + ", ".join(missing) + " (그대로 두면 무시됩니다)")
     lines.append("\n맞으면 <b>확인</b>, 아니면 <b>취소</b> 라고 보내주세요.")
     return "\n".join(lines), None
 
@@ -697,8 +747,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if wb is None:
                 await update.message.reply_text("해당 달 출석부 파일이 없어요. 파일을 보내거나 /생성 해주세요.")
                 return
-            written, warnings = ac.write_attendance(wb, info["sheet"], info["date"], info["data"])
+            enroll = load_enroll().get(info["sheet"], {})
+            written, warnings = ac.write_attendance(
+                wb, info["sheet"], info["date"], info["data"], enroll=enroll
+            )
             wb.save(path)
+            life = info["data"].get("학적") or {}
+            if life:  # 학적 변동을 재적 기록에 반영
+                apply_enroll_events(info["sheet"], info["date"], life)
             msg = f"✅ 기록 완료 ({info['sheet']} {info['date']}) — {len(written)}건\n" + "\n".join(
                 "  • " + w for w in written
             )
