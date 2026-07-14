@@ -55,9 +55,11 @@ def _cell_color(cell):
     return BLACK
 
 
-def render_class_table(cls_name, ws, dates, scale=2):
-    """cls_name 반의 dates(예: ['7/7','7/8']) 블록을 표 이미지로 그린다."""
-    roster = list(ac.get_roster(ws).items())  # [(name, col), ...] 열 순서
+def render_class_table(cls_name, ws, dates, scale=2, keep=None):
+    """cls_name 반의 dates(예: ['7/7','7/8']) 블록을 표 이미지로 그린다.
+    keep: 포함할 학생 이름 집합(None이면 전원). 재적 아닌 학생 제외용."""
+    roster = [(n, c) for n, c in ac.get_roster(ws).items()
+              if keep is None or n in keep]  # [(name, col), ...] 열 순서
     fnt = _font(15 * scale)
     fnt_b = _font(15 * scale)
     tmp = Image.new("RGB", (10, 10)); md = ImageDraw.Draw(tmp)
@@ -184,14 +186,20 @@ def week_dates(ws, monday, sunday, year):
     return out
 
 
-def build_report_pdf(wb, out_path, monday, sunday, year, title="<수학과 주간 출결사항>"):
-    """이번 주 각 반 표를 모아 PDF로 저장. 반환: 포함된 반 수(0이면 미생성)."""
+def build_report_pdf(wb, out_path, monday, sunday, year,
+                     title="<수학과 주간 출결사항>", enroll=None):
+    """이번 주 각 반 표를 모아 PDF로 저장. 반환: 포함된 반 수(0이면 미생성).
+    enroll: {반: {학생: {'from','to'}}} — 그 주에 재적 아닌 학생은 표에서 제외."""
+    enroll = enroll or {}
     pages = []
     for cls in wb.sheetnames:
         dates = week_dates(wb[cls], monday, sunday, year)
         if not dates:
             continue
-        tbl = render_class_table(cls, wb[cls], dates)
+        cls_enroll = enroll.get(cls, {})
+        keep = {n for n in ac.get_roster(wb[cls])
+                if ac.is_enrolled_during(cls_enroll.get(n), monday, sunday, year)}
+        tbl = render_class_table(cls, wb[cls], dates, keep=keep)
         head_title = f"{title}   ({monday.month}/{monday.day}~{sunday.month}/{sunday.day})" if not pages else None
         pages.append(render_class_page(cls, tbl, head_title))
     if not pages:

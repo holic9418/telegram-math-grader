@@ -996,7 +996,7 @@ def generate_weekly_report(target=None):
     wb = ac.load_workbook(p)
     fname = f"수학과 주간 출결사항 ({monday.month}.{monday.day}~{sunday.month}.{sunday.day}).pdf"
     out = os.path.join(DATA_DIR, fname)
-    n = rpt.build_report_pdf(wb, out, monday, sunday, sunday.year)
+    n = rpt.build_report_pdf(wb, out, monday, sunday, sunday.year, enroll=load_enroll())
     return (out, n) if n else (None, 0)
 
 

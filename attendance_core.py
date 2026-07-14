@@ -401,6 +401,30 @@ def is_absent(value):
     return 'X' in s.upper()
 
 
+def _parse_md(s, year):
+    """'M/D' → date. 실패 시 None."""
+    try:
+        m, d = map(int, str(s).split('/'))
+        return datetime.date(year, m, d)
+    except Exception:
+        return None
+
+
+def is_enrolled_during(info, monday, sunday, year):
+    """info={'from':'M/D'|None,'to':'M/D'|None} 학생이 [monday,sunday] 주에 재적 중인지.
+    - 그 주 시작 전에 이미 나간(to < monday) 학생은 제외 (→ 다음 주부터 안 나옴)
+    - 그 주 이후에 들어오는(from > sunday) 학생도 제외"""
+    if not info:
+        return True
+    to = _parse_md(info.get('to'), year)
+    if to and to < monday:
+        return False
+    frm = _parse_md(info.get('from'), year)
+    if frm and frm > sunday:
+        return False
+    return True
+
+
 def _homework_color(value):
     """과제수행 값 → 글자색. 안함=빨강, 50%/절반=파랑, 완료=검정."""
     s = str(value).strip()
