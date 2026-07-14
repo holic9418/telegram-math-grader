@@ -155,6 +155,33 @@ def set_report_to(chat_id):
         json.dump({"chat_id": chat_id}, f)
 
 
+# ── 관리자(주인) ───────────────────────────────────────────────
+def admin_path():
+    return os.path.join(DATA_DIR, "admin.json")
+
+
+def get_admin():
+    """관리자 chat_id. 환경변수 ADMIN_CHAT_ID 우선, 없으면 admin.json."""
+    env = (os.environ.get("ADMIN_CHAT_ID") or "").strip()
+    if env.lstrip("-").isdigit():
+        return int(env)
+    p = admin_path()
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            return json.load(f).get("chat_id")
+    return None
+
+
+def set_admin(chat_id):
+    with open(admin_path(), "w", encoding="utf-8") as f:
+        json.dump({"chat_id": chat_id}, f)
+
+
+def is_admin(chat_id):
+    a = get_admin()
+    return a is not None and a == chat_id
+
+
 def enroll_path():
     return os.path.join(DATA_DIR, "enrollments.json")
 
@@ -646,9 +673,40 @@ async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def require_admin(update: Update) -> bool:
+    """관리자면 True. 아니면 안내 메시지 보내고 False."""
+    if is_admin(update.effective_chat.id):
+        return True
+    if get_admin() is None:
+        await update.message.reply_text(
+            "아직 관리자가 없어요. 주인(선생님)이 '관리자등록' 이라고 보내 등록해 주세요."
+        )
+    else:
+        await update.message.reply_text("🔒 이 기능은 관리자만 쓸 수 있어요.")
+    return False
+
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """관리자 등록. 아직 관리자가 없을 때 처음 보낸 사람이 관리자가 된다."""
+    chat_id = update.effective_chat.id
+    remember_chat(chat_id)
+    a = get_admin()
+    if a is None:
+        set_admin(chat_id)
+        await update.message.reply_text(
+            "✅ 관리자로 등록됐어요.\n이제 '설정초기화'와 '주간보고서'는 관리자(당신)만 사용/수신합니다."
+        )
+    elif a == chat_id:
+        await update.message.reply_text("이미 관리자로 등록돼 있어요. 👍")
+    else:
+        await update.message.reply_text("이미 다른 분이 관리자로 등록돼 있어요.")
+
+
 async def cmd_reset_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """반 목록·수업요일·알림 시간표를 코드 기본값으로 다시 맞춘다.
     (반 구성이 바뀐 뒤 한 번 실행. 담당 지정은 그대로 둔다.)"""
+    if not await require_admin(update):
+        return
     remember_chat(update.effective_chat.id)
     for p in (schedules_path(), times_path()):
         if os.path.exists(p):
@@ -803,6 +861,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if kw in ("담당", "내반", "담당반"):
         context.args = parts[1:]
         return await cmd_teacher(update, context)
+    if low in ("관리자등록", "관리자", "관리자설정"):
+        return await cmd_admin(update, context)
     if low in ("설정초기화", "기본설정복원", "반목록갱신"):
         return await cmd_reset_config(update, context)
     if low in ("주간보고서", "보고서", "주간출결"):
@@ -1003,18 +1063,18 @@ def generate_weekly_report(target=None):
 async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     remember_chat(chat_id)
-    first_time = get_report_to() is None
-    set_report_to(chat_id)  # 이 채팅을 주간 보고서 수신자로 등록(자동 전송 대상)
+    if not await require_admin(update):
+        return
     await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
     out, n = generate_weekly_report()
     if not out:
         await update.message.reply_text("이번 주 출결 데이터가 있는 출석부 파일을 찾지 못했어요.")
         return
-    cap = f"📄 주간 출결 보고서 · {n}개 반"
-    if first_time:
-        cap += "\n(이제 매주 일요일 보고서는 이 채팅으로만 전송돼요.)"
     with open(out, "rb") as f:
-        await update.message.reply_document(document=f, filename=os.path.basename(out), caption=cap)
+        await update.message.reply_document(
+            document=f, filename=os.path.basename(out),
+            caption=f"📄 주간 출결 보고서 · {n}개 반"
+        )
 
 
 # 이번 주 보고서를 이미 보냈는지 (ISO 주 기준)
@@ -1035,8 +1095,8 @@ async def report_job(context: ContextTypes.DEFAULT_TYPE):
     if not out:
         log.info("주간 보고서: 이번 주 데이터 없음")
         return
-    to = get_report_to()
-    recipients = [to] if to else known_chats()  # 지정 수신자에게만(없으면 전체)
+    to = get_admin() or get_report_to()  # 관리자에게만(없으면 기존 수신자)
+    recipients = [to] if to else known_chats()
     for chat_id in recipients:
         try:
             with open(out, "rb") as f:
