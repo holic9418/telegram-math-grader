@@ -59,6 +59,8 @@ claude = anthropic.AsyncAnthropic()
 WD = ["월", "화", "수", "목", "금", "토", "일"]
 FNAME_RE = re.compile(r"^\d{2}\.\d{2} 출석부\.xlsx$")
 KST = ZoneInfo("Asia/Seoul")  # 알림은 한국시간 기준
+# 밀린 미입력 알림은 이 날짜부터만 (그 이전 옛 날짜는 알림 제외)
+BACKLOG_SINCE = datetime.date(2026, 7, 13)
 
 # 확인/취소 대기 중인 입력: {chat_id: {"sheet","date","data","warnings"}}
 pending: dict[int, dict] = {}
@@ -1032,6 +1034,8 @@ def scan_backlog(wb, today):
                 dd = datetime.date(today.year, m, d)
             except ValueError:
                 continue
+            if dd < BACKLOG_SINCE:
+                continue  # 기준일 이전 옛 날짜는 알림 제외
             if dd >= today:
                 continue  # 오늘·미래는 당일 알림(reminder_job) 담당
             if ac.attendance_recorded(ws, ds) is False:
