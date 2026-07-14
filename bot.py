@@ -451,22 +451,39 @@ def build_preview(wb, parsed):
     return "\n".join(lines), None
 
 
-# ── 명령어 핸들러 ──────────────────────────────────────────────
+# ── 사용 안내 (처음 시작 시 자동 전송) ─────────────────────────
+GUIDE = """📋 <b>수학과 출석부 봇 사용법</b>
+
+선생님들이 함께 쓰는 출석부예요. 여기 적으면 <b>공용 출석부 파일에 자동 기록</b>됩니다.
+
+<b>1) 출석 입력</b> — 그냥 편하게 문장으로 적어주세요.
+예) <code>초5 오늘 남우현 결석, 나머지 출석. 수업 분수나눗셈, 다음과제 42쪽</code>
+→ 봇이 미리보기를 보여주면 <b>확인</b> 이라고 답하면 기록돼요. (아니면 <b>취소</b>)
+
+<b>2) 출석 표기</b>
+• 결석: <code>OO 결석</code> (사유 말하면 그대로, 없으면 무단)
+• 지각: <code>OO 30분 지각</code> / <code>병원가서 30분 늦음</code> → <code>30분(병원)</code>
+• 조퇴: <code>OO 조퇴</code>
+• 숙제: 안 하면 <code>X</code>, 절반은 <code>50%</code>, 미지참은 <code>미지참</code>
+• 시험: <code>비고를 단원평가로 바꾸고 모두 100점, 철수만 90점</code>
+
+<b>3) 파일 받기</b>
+• <b>출석부</b> → 이번 달 파일 / <b>출석부 7월</b> → 특정 달
+
+<b>4) 내 담당 반 지정</b> (중요!)
+• <b>담당 초5 중2</b> 처럼 보내면, 그 반 알림만 받아요.
+
+<b>5) 알림</b>
+• <b>일정</b> : 반별 수업 요일 보기·변경 (예: <code>일정 고1 화목토</code>)
+• <b>알림 초5 21:00</b> : 출석 입력 깜빡 방지 알림 시각 설정
+• 매일 밀린 미입력 출석도 알려드려요.
+
+궁금하면 아무 때나 <b>도움말</b> 이라고 보내면 이 안내가 다시 떠요. 🙂"""
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remember_chat(update.effective_chat.id)
-    await update.message.reply_text(
-        "안녕하세요! 출석부 봇이에요. 📋\n\n"
-        "• 출석 입력: 그냥 자유롭게 적어주세요\n"
-        "   예) 초5 오늘 남우현 결석, 나머지 출석. 수업 분수나눗셈\n"
-        "• /출석부 : 이번 달 파일 받기 (/출석부 26.07 처럼 특정 달도)\n"
-        "• /일정 : 반별 수업 요일 보기·변경\n"
-        "• 알림 : 출석 입력 깜빡 방지 알림 (예: 알림 초5 21:00)\n"
-        "• 담당 : 내 담당 반 지정 (예: 담당 초5 중2) — 그 반 알림만 받기\n"
-        "• 주간보고서 : 이번 주 출결 보고서 PDF 받기 (매주 일요일 자동 전송)\n"
-        "• /생성 : 이번 달 파일 새로 만들기\n"
-        "• xlsx 파일을 보내면 저장해요\n\n"
-        "매월 1일엔 자동으로 새 달 출석부를 만들어 알려드려요."
-    )
+    await update.message.reply_text(GUIDE, parse_mode="HTML")
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -800,7 +817,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = update.message.text.strip()
+    # 처음 말 거는 쌤에게는 사용 안내를 공지처럼 먼저 보낸다
+    first_contact = chat_id not in known_chats()
     remember_chat(chat_id)
+    if first_contact:
+        await update.message.reply_text(GUIDE, parse_mode="HTML")
 
     low = text.lstrip("/").strip()
     parts = low.split()
