@@ -244,6 +244,25 @@ def find_date_block(ws, date_str):
     return None
 
 
+def attendance_recorded(ws, date_str):
+    """해당 날짜의 출석 행에 기록이 있는지 확인한다.
+    반환: True  = 이미 출석 입력됨
+          False = 그 날짜 블록은 있으나 출석이 비어 있음(입력 필요)
+          None  = 해당 날짜 블록 없음 / 공휴일·휴강 블록(확인 불가·불필요)."""
+    top = find_date_block(ws, date_str)
+    if top is None:
+        return None
+    start = _find_start_row(ws)
+    last_col = _last_col(ws, start)
+    if _is_holiday_block(ws, top, last_col):
+        return None
+    att_row = top + ROW_OFFSET['출석']
+    for c in get_roster(ws).values():
+        if ws.cell(att_row, c).value not in (None, ''):
+            return True
+    return False
+
+
 def rosters_summary(wb):
     """{sheet: [학생이름,...]} — 봇 파싱용."""
     out = {}
@@ -258,6 +277,19 @@ ROW_OFFSET = {'출석': 0, '수업내용': 1, '과제수행': 2, '다음과제':
 DEFAULT_SCHEDULES = {
     '초5': [1, 2, 3], '초6': [0, 2, 4], '중1': [0, 2, 4], '중2': [1, 2, 3],
     '중3': [0, 2, 4], '고1': [1, 3, 5], '고2(미적분)': [1, 3, 5], '고3': [0, 2, 4],
+}
+
+# 반별 '출석 입력 확인' 시각 = 수업 종료 15분 뒤. {반: {요일idx(str): 'HH:MM'}}
+# 요일 idx: 월0 화1 수2 목3 금4 토5 일6. 이 표에 있는 요일·시각에만 알림이 울린다.
+DEFAULT_CLASS_TIMES = {
+    '초5': {'1': '16:15', '2': '16:15', '3': '16:15'},          # 화수목 3~4시
+    '초6': {'0': '16:15', '2': '16:15', '4': '16:15'},          # 월수금 3~4시
+    '중1': {'0': '20:15', '4': '20:15', '2': '19:15'},          # 월금 6~8시 / 수 6~7시
+    '중2': {'1': '18:15', '3': '18:15', '2': '17:15'},          # 화목 4~6시 / 수 4~5시
+    '중3': {'0': '18:15', '4': '18:15', '2': '18:15'},          # 월금 4~6시 / 수 5~6시
+    '고1': {'1': '22:15', '3': '22:15', '5': '12:15'},          # 화목 8~10시 / 토 10~12시
+    '고2(미적분)': {'1': '20:15', '3': '20:15', '5': '14:15'},  # 화목 6~8시 / 토 12~2시
+    '고3': {'0': '22:15', '2': '22:15', '4': '22:15'},          # 월수금 8~10시
 }
 
 
@@ -346,6 +378,15 @@ def _attendance_color(value):
     return COLOR_BLACK
 
 
+def is_absent(value):
+    """출석 값이 '결석'인지 판단한다 (지각·조퇴는 수업 참석으로 보아 제외).
+    결석이면 그 학생의 과제수행·비고 칸을 비운다."""
+    s = str(value)
+    if '지각' in s or '조퇴' in s:
+        return False
+    return 'X' in s.upper()
+
+
 def _homework_color(value):
     """과제수행 값 → 글자색. 안함=빨강, 50%/절반=파랑, 완료=검정."""
     s = str(value).strip()
@@ -384,6 +425,17 @@ def write_attendance(wb, sheet, date_str, data):
     roster = get_roster(ws)
     written, warnings = [], []
 
+    # 결석(지각·조퇴 제외) 학생: 과제수행·비고 칸을 비운다
+    absent = {
+        st for st, val in (data.get('출석') or {}).items()
+        if st in roster and is_absent(val)
+    }
+    for st in absent:
+        for label in ('과제수행', '비고'):
+            cell = ws.cell(top + ROW_OFFSET[label], roster[st])
+            cell.value = None
+            _apply_font_color(cell, COLOR_BLACK)
+
     def put(label, student, value):
         r = top + ROW_OFFSET[label]
         if student not in roster:
@@ -401,6 +453,8 @@ def write_attendance(wb, sheet, date_str, data):
         block = data.get(label)
         if isinstance(block, dict):
             for st, val in block.items():
+                if label in ('과제수행', '비고') and st in absent:
+                    continue  # 결석 학생의 과제·비고는 위에서 비웠으므로 건너뜀
                 put(label, st, val)
         elif isinstance(block, str) and block.strip():
             # 단체 문자열 → 라벨행 첫 학생칸(병합 앵커 아님)에 기록

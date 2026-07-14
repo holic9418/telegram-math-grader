@@ -20,6 +20,7 @@ import re
 import json
 import logging
 import datetime
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 import anthropic
@@ -56,6 +57,7 @@ claude = anthropic.AsyncAnthropic()
 
 WD = ["월", "화", "수", "목", "금", "토", "일"]
 FNAME_RE = re.compile(r"^\d{2}\.\d{2} 출석부\.xlsx$")
+KST = ZoneInfo("Asia/Seoul")  # 알림은 한국시간 기준
 
 # 확인/취소 대기 중인 입력: {chat_id: {"sheet","date","data","warnings"}}
 pending: dict[int, dict] = {}
@@ -93,6 +95,27 @@ def load_schedules():
 def save_schedules(s):
     with open(schedules_path(), "w", encoding="utf-8") as f:
         json.dump(s, f, ensure_ascii=False, indent=2)
+
+
+def times_path():
+    return os.path.join(DATA_DIR, "class_times.json")
+
+
+def load_times():
+    """{반이름: {요일idx(str): 'HH:MM'}} — 반별·요일별 출석 입력 확인 시각.
+    파일이 없으면 기본 시간표(수업 종료 15분 뒤)를 심고 반환한다."""
+    p = times_path()
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    default = {k: dict(v) for k, v in ac.DEFAULT_CLASS_TIMES.items()}
+    save_times(default)
+    return default
+
+
+def save_times(t):
+    with open(times_path(), "w", encoding="utf-8") as f:
+        json.dump(t, f, ensure_ascii=False, indent=2)
 
 
 def chats_path():
@@ -196,8 +219,12 @@ PARSE_SYSTEM = """너는 학원 출석부 입력 도우미다. 선생님의 한�
 - date 는 'M/D' 형식(예: 8/4). '오늘/어제/지난 화요일' 등은 오늘 날짜 기준으로 계산.
 - 언급되지 않은 항목(키)은 넣지 않는다. 값이 없으면 그 키를 생략.
 - '전원/다 출석/나머지 다 출석' 같은 표현은 명단 전체에 O 로 채우되, 개별 언급(결석 등)이 우선.
-- 출석 값: 정상="O"(대문자 오), 결석="X(결석)" 또는 "X(사유)", 지각="지각", 조퇴="조퇴".
-- 과제수행 값: 완료="O", 안함="X", 절반/50%="50%".
+- 출석 값: 정상 출석="O"(대문자 오). 정상이 아니면 "X (사유)" 형식으로 적는다(X 뒤에 한 칸 띄고 괄호 안에 사유).
+    · 사유가 언급되면 그 사유를 넣는다. 예) 여행으로 결석="X (여행)", 아파서 결석="X (몸살)".
+    · 구체적 사유가 없으면 상태명을 넣는다. 예) 그냥 결석="X (결석)", 조퇴="X (조퇴)".
+    · 지각은 반드시 괄호 안에 '지각'을 포함한다. 예) 지각="X (지각)", 병원 때문에 지각="X (지각, 병원)".
+- 과제수행 값: 완료="O". 안 했으면 "X (사유)" 형식으로 적는다.
+    · 안 가져옴="X (미지참)", 그냥 안 함/미완성="X (미완성)", 다른 사유가 있으면 그 사유를 넣는다. 절반/50%="50%".
 - 시험/평가 관련: '비고를 ~로 바꿔줘' 처럼 비고 행 이름을 바꾸라 하면 "비고라벨"에 그 이름을 그대로 넣는다.
   (일일test, 주간test, 단원평가 등 무엇이든 사용자가 말한 이름을 그대로 사용)
   점수는 "비고"에 학생별로 넣는다(예: {"김규림":"100"}). '모두/전원 N점'이면 명단 전체에 N을 채운다(개별 언급 우선).
@@ -269,10 +296,10 @@ def build_preview(wb, parsed):
     warnings = []
 
     att = parsed.get("출석") or {}
+    absent = {n for n, v in att.items() if ac.is_absent(v)}
     if att:
         parts = []
         for name, val in att.items():
-            mark = "❌" if val not in ("O", "o") else "✅"
             parts.append(f"{name} {val}")
             if name not in roster:
                 warnings.append(name)
@@ -281,7 +308,9 @@ def build_preview(wb, parsed):
         lines.append(f"• 수업내용: {parsed['수업내용']}")
     hw = parsed.get("과제수행") or {}
     if hw:
-        lines.append("• 과제수행: " + ", ".join(f"{n} {v}" for n, v in hw.items()))
+        shown = {n: v for n, v in hw.items() if n not in absent}
+        if shown:
+            lines.append("• 과제수행: " + ", ".join(f"{n} {v}" for n, v in shown.items()))
         warnings += [n for n in hw if n not in roster]
     if parsed.get("다음과제"):
         lines.append(f"• 다음과제: {parsed['다음과제']}")
@@ -290,8 +319,12 @@ def build_preview(wb, parsed):
         lines.append(f"• 비고 칸 이름 → <b>{bg_label}</b> 으로 변경")
     bg = parsed.get("비고") or {}
     if isinstance(bg, dict) and bg:
-        lines.append(f"• {bg_label}: " + ", ".join(f"{n}: {v}" for n, v in bg.items()))
+        shown_bg = {n: v for n, v in bg.items() if n not in absent}
+        if shown_bg:
+            lines.append(f"• {bg_label}: " + ", ".join(f"{n}: {v}" for n, v in shown_bg.items()))
         warnings += [n for n in bg if n not in roster]
+    if absent:
+        lines.append(f"• 결석: {', '.join(sorted(absent))} → 과제수행·비고는 비워둡니다.")
 
     if warnings:
         lines.append("\n⚠️ 명단에 없는 이름: " + ", ".join(sorted(set(warnings))) + " (그대로 두면 무시됩니다)")
@@ -308,6 +341,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "   예) 초5 오늘 남우현 결석, 나머지 출석. 수업 분수나눗셈\n"
         "• /출석부 : 이번 달 파일 받기 (/출석부 26.07 처럼 특정 달도)\n"
         "• /일정 : 반별 수업 요일 보기·변경\n"
+        "• 알림 : 출석 입력 깜빡 방지 알림 (예: 알림 초5 21:00)\n"
         "• /생성 : 이번 달 파일 새로 만들기\n"
         "• xlsx 파일을 보내면 저장해요\n\n"
         "매월 1일엔 자동으로 새 달 출석부를 만들어 알려드려요."
@@ -344,6 +378,109 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_schedules(scheds)
     await update.message.reply_text(
         f"✅ {name} 수업 요일을 {'·'.join(WD[i] for i in idxs)} 로 바꿨어요. (다음 달 생성부터 적용)"
+    )
+
+
+def parse_time_token(text):
+    """'17:00','17시','5시','오후 5시','오후5시30분','5:30','17' → 'HH:MM'(24시간). 실패 시 None."""
+    t = str(text).strip()
+    pm = any(k in t for k in ("오후", "저녁", "밤"))
+    am = "오전" in t
+    t2 = re.sub(r"(오전|오후|저녁|밤|정각)", "", t).strip()
+    m = re.search(r"(\d{1,2})\s*[:시]\s*(\d{1,2})?", t2)
+    if m:
+        hh = int(m.group(1))
+        mm = int(m.group(2)) if m.group(2) else 0
+    else:
+        m2 = re.search(r"\b(\d{1,2})\b", t2)
+        if not m2:
+            return None
+        hh, mm = int(m2.group(1)), 0
+    if pm and hh < 12:
+        hh += 12
+    if am and hh == 12:
+        hh = 0
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        return None
+    return f"{hh:02d}:{mm:02d}"
+
+
+async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    remember_chat(update.effective_chat.id)
+    args = context.args
+    times = load_times()
+    scheds = load_schedules()
+
+    if not args:  # 현재 알림표 보기
+        if not times:
+            await update.message.reply_text(
+                "설정된 출석 입력 알림이 없어요.\n"
+                "예) 알림 초5 화수목 16:15  → 그 요일 16:15에 출석 미입력 시 알림\n"
+                "끄기) 알림 초5 끄기"
+            )
+            return
+        lines = ["📝 출석 입력 알림 (한국시간, 수업일에 미입력 시 알림):"]
+        for cls in sorted(times):
+            table = times[cls]
+            if not isinstance(table, dict):
+                continue
+            parts = " ".join(f"{WD[int(d)]}{t}" for d, t in sorted(table.items()))
+            lines.append(f"• {cls}: {parts}")
+        lines.append("\n변경) 알림 초5 화수목 16:15    끄기) 알림 초5 끄기 (또는 알림 초5 수 끄기)")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    cls = args[0]
+    # 남은 토큰을 요일 / 시간 / 끄기 로 분류
+    day_idxs, time_tokens, off = [], [], False
+    for tok in args[1:]:
+        t = tok.strip()
+        if t in ("끄기", "해제", "삭제", "제거", "off", "취소"):
+            off = True
+            continue
+        base = t.replace("요일", "")
+        if base and all(ch in WD for ch in base):   # 화수목 / 월 / 토
+            day_idxs += [WD.index(ch) for ch in base]
+        elif t:
+            time_tokens.append(t)
+    day_idxs = sorted(set(day_idxs))
+    table = times[cls] if isinstance(times.get(cls), dict) else {}
+
+    if off:
+        if day_idxs:  # 특정 요일만 끄기
+            for d in day_idxs:
+                table.pop(str(d), None)
+            if table:
+                times[cls] = table
+            else:
+                times.pop(cls, None)
+            msg = f"✅ {cls} {'·'.join(WD[d] for d in day_idxs)}요일 알림을 껐어요."
+        else:  # 그 반 전체 끄기
+            times.pop(cls, None)
+            msg = f"✅ {cls} 알림을 모두 껐어요."
+        save_times(times)
+        await update.message.reply_text(msg)
+        return
+
+    hhmm = parse_time_token(" ".join(time_tokens))
+    if not hhmm:
+        await update.message.reply_text(
+            "시간을 못 알아들었어요.\n예) 알림 초5 화수목 16:15 · 알림 중1 수 19:15"
+        )
+        return
+    if not day_idxs:
+        day_idxs = list(scheds.get(cls, []))
+    if not day_idxs:
+        await update.message.reply_text(
+            f"'{cls}' 수업 요일을 함께 알려주세요.\n예) 알림 {cls} 화목 18:15"
+        )
+        return
+    for d in day_idxs:
+        table[str(d)] = hhmm
+    times[cls] = table
+    save_times(times)
+    await update.message.reply_text(
+        f"✅ {cls} — {'·'.join(WD[d] for d in day_idxs)}요일 {hhmm}에 출석 미입력 시 알려드릴게요."
     )
 
 
@@ -475,6 +612,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if kw in ("일정", "스케줄"):
         context.args = parts[1:]
         return await cmd_schedule(update, context)
+    if kw in ("알림", "알람", "리마인더"):
+        context.args = parts[1:]
+        return await cmd_remind(update, context)
     if low in ("생성", "새달", "새달생성"):
         return await cmd_generate(update, context)
     if low in ("시작", "도움말", "도움"):
@@ -515,6 +655,58 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(preview, parse_mode="HTML")
 
 
+# ── 출석 입력 알림 ─────────────────────────────────────────────
+# 오늘 이미 확인/발송한 반 기록: {(YYYY-MM-DD, 반이름)}  (중복 방지)
+_sent_reminders: set = set()
+
+
+async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    """1분마다 확인 → 각 반의 수업일·설정시각(KST)이 되면 출석부를 점검해서,
+    아직 출석 입력이 안 됐을 때만 알림을 보낸다. 하루 한 번, 반별로.
+    시각을 1~2분 놓쳐도 보내도록 120초 창을 둔다."""
+    now = datetime.datetime.now(KST)
+    today = now.date().isoformat()
+    # 지난 날짜 기록 정리
+    for k in [k for k in _sent_reminders if k[0] != today]:
+        _sent_reminders.discard(k)
+
+    wd = str(now.weekday())  # '0'=월 … '6'=일
+    # 지금 확인 시각이 된 반들 추리기 (요일별 표에서 오늘 요일의 시각을 찾음)
+    due = []
+    for cls, table in load_times().items():
+        tm = table.get(wd) if isinstance(table, dict) else None
+        if not tm:
+            continue  # 오늘 수업(알림) 없는 반은 건너뜀
+        try:
+            hh, mm = (int(x) for x in str(tm).split(":"))
+        except (ValueError, AttributeError):
+            continue
+        sched = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        delta = (now - sched).total_seconds()
+        key = (today, cls)
+        if 0 <= delta < 120 and key not in _sent_reminders:
+            due.append((cls, key))
+    if not due:
+        return
+
+    wb, _ = load_current_wb()  # 이번 달 출석부 (없으면 None)
+    date_str = f"{now.month}/{now.day}"
+    for cls, key in due:
+        _sent_reminders.add(key)  # 오늘 이 반은 확인 완료 (재확인·중복발송 방지)
+        recorded = None
+        if wb is not None and cls in wb.sheetnames:
+            recorded = ac.attendance_recorded(wb[cls], date_str)
+        if recorded is False:  # 블록은 있는데 출석이 비어 있음 → 입력 안 함
+            for chat_id in known_chats():
+                try:
+                    await context.bot.send_message(
+                        chat_id,
+                        f"📝 {cls} 오늘({date_str}) 출석부를 아직 입력 안 하셨어요. 잊지 마세요!",
+                    )
+                except Exception as e:
+                    log.warning("알림 전송 실패 %s: %s", chat_id, e)
+
+
 # ── 매월 1일 자동 생성 ─────────────────────────────────────────
 async def monthly_job(context: ContextTypes.DEFAULT_TYPE):
     """이번 달 파일이 없으면(=달이 바뀌면) 지난달 바탕으로 생성하고 알림.
@@ -548,6 +740,7 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("download", cmd_download))
     app.add_handler(CommandHandler("schedule", cmd_schedule))
+    app.add_handler(CommandHandler("remind", cmd_remind))
     app.add_handler(CommandHandler("generate", cmd_generate))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -556,9 +749,11 @@ def main():
         # 매일 확인 + 시작 직후 1회 확인 (달이 바뀌면 새 파일 생성)
         app.job_queue.run_daily(monthly_job, time=datetime.time(0, 5))
         app.job_queue.run_once(monthly_job, when=10)
-        log.info("월간 자동 생성 스케줄 등록됨 (매일 확인)")
+        # 1분마다 출석 입력 알림 확인 (한국시간 기준)
+        app.job_queue.run_repeating(reminder_job, interval=60, first=15)
+        log.info("월간 자동 생성 + 출석 입력 알림 스케줄 등록됨")
     else:
-        log.warning("job_queue 미설치 — 자동 생성 비활성 (requirements 확인)")
+        log.warning("job_queue 미설치 — 자동 생성/알림 비활성 (requirements 확인)")
 
     log.info("출석부 봇 시작")
     app.run_polling()
