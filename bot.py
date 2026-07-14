@@ -481,6 +481,7 @@ Zest 수학과 선생님들이 함께 쓰는 출석부예요.
 <b>3) 파일·미리보기 받기</b>
 • <b>출석부</b> 라고 보내면 이번 달 파일을, <b>출석부 7월</b> 이면 특정 달 파일을 보내드려요.
 • <b>초5 7월 15일 미리보기</b> 처럼 반+날짜를 주시면, 그 부분만 <b>이미지로</b> 보여드려요. (전체 파일 안 받아도 돼요)
+• <b>남우현 7월</b> 처럼 학생 이름+기간을 주시면, 그 학생의 출결만 정리해 이미지로 보여드려요. (이번주·특정 날짜도 OK)
 
 <b>4) 내 담당 반 지정</b> (중요!)
 • <b>담당 초5 중2</b> 처럼 보내주시면, 그 반 알림만 받게 됩니다.
@@ -908,6 +909,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_report(update, context)
     if any(k in low for k in ("미리보기", "캡처", "보여줘", "보여주", "이미지로")):
         return await cmd_preview(update, context)
+    # '남우현 7월' 처럼 이름+기간만 온 경우도 학생별 미리보기로 (뒤에 다른 말 없을 때만)
+    if re.fullmatch(
+        r'[가-힣]{2,4}\s+(?:\d{1,2}\s*월|이번달|지난달|이번주|저번주|지난주|오늘|어제|\d{1,2}[/.]\d{1,2})'
+        r'\s*(?:미리보기|보여줘|보여주세요|캡처|이미지로?)?', low
+    ):
+        return await cmd_preview(update, context)
     if low in ("생성", "새달", "새달생성"):
         return await cmd_generate(update, context)
     if low in ("시작", "도움말", "도움"):
@@ -1152,8 +1159,73 @@ def _resolve_preview_date(text):
     return None
 
 
+def _find_student(text, wb):
+    """텍스트에 등장하는 학생 이름과 그 반을 찾는다. (name, sheet) 또는 (None, None)."""
+    for sheet in wb.sheetnames:
+        for nm in ac.get_roster(wb[sheet]):
+            if nm and nm in text:
+                return nm, sheet
+    return None, None
+
+
+async def _preview_student(update, context, name, sheet, text):
+    """한 학생의 기간(월/주/날짜) 출결을 이미지로 보낸다."""
+    chat_id = update.effective_chat.id
+    today = datetime.datetime.now(KST).date()
+    # 기간 결정: 주 > 단일날짜 > 월 > (기본)이번달
+    if any(k in text for k in ("이번주", "금주")):
+        mon, sun = rpt.week_bounds(today)
+    elif any(k in text for k in ("저번주", "지난주")):
+        mon, sun = rpt.week_bounds(today - datetime.timedelta(days=7))
+    else:
+        mon = sun = None
+
+    if mon is not None:
+        wb, _, _ = load_wb_for_date(f"{mon.month}/{mon.day}")
+        if wb is None:
+            wb, _ = load_latest_wb()
+        dates = rpt.week_dates(wb[sheet], mon, sun, sun.year)
+        cap = f"📷 {name} · {mon.month}/{mon.day}~{sun.month}/{sun.day}"
+    else:
+        d = _resolve_preview_date(text)
+        if d is not None:
+            ds = f"{d.month}/{d.day}"
+            wb, _, mo = load_wb_for_date(ds)
+            if wb is None:
+                await update.message.reply_text(f"{mo}월 출석부 파일이 없어요.")
+                return
+            dates = [ds] if ac.find_date_block(wb[sheet], ds) else []
+            cap = f"📷 {name} · {ds}"
+        else:
+            mm = re.search(r'(\d{1,2})\s*월', text)
+            if '지난달' in text:
+                month = 12 if today.month == 1 else today.month - 1
+            elif mm:
+                month = int(mm.group(1))
+            else:
+                month = today.month
+            wb, _, _ = load_wb_for_date(f"{month}/1")
+            if wb is None:
+                wb, _ = load_latest_wb()
+            dates = ac.sheet_dates(wb).get(sheet, [])
+            cap = f"📷 {name} · {month}월"
+
+    if not dates:
+        await update.message.reply_text(f"{name}({sheet})의 해당 기간 수업일이 없어요.")
+        return
+    await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+    img = rpt.render_student_table(name, wb[sheet], dates)
+    if img is None:
+        await update.message.reply_text(f"{name} 학생을 명단에서 못 찾았어요.")
+        return
+    bio = io.BytesIO()
+    img.save(bio, "PNG")
+    bio.seek(0)
+    await update.message.reply_photo(photo=bio, caption=cap)
+
+
 async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """'초5 7월 15일 미리보기'처럼 반+날짜를 주면 그 부분만 이미지로 보낸다."""
+    """'초5 7월 15일 미리보기'(반+날짜) 또는 '남우현 7월'(학생+기간)을 이미지로 보낸다."""
     chat_id = update.effective_chat.id
     remember_chat(chat_id)
     text = update.message.text
@@ -1161,6 +1233,10 @@ async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if latest is None:
         await update.message.reply_text("아직 출석부 파일이 없어요.")
         return
+    # 학생 이름이 있으면 학생별 미리보기 우선
+    sname, ssheet = _find_student(text, latest)
+    if sname:
+        return await _preview_student(update, context, sname, ssheet, text)
     cands = _match_preview_sheet(text, latest.sheetnames)
     if not cands:
         await update.message.reply_text("어느 반인지 알려주세요. 예) 초5 7월 15일 미리보기")

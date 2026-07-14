@@ -55,6 +55,89 @@ def _cell_color(cell):
     return BLACK
 
 
+STUDENT_COLS = ['출석', '과제수행', '수업내용', '다음과제', '비고']
+
+
+def render_student_table(name, ws, dates, scale=2):
+    """한 학생(name)의 dates별 출석/과제/수업내용/다음과제/비고를 세로 표로 그린다.
+    (날짜가 행, 항목이 열). 결석=빨강, 지각·조퇴=파랑 색은 파일 그대로 반영."""
+    col = ac.get_roster(ws).get(name)
+    if col is None:
+        return None
+    last_col = ac._last_col(ws, ac._find_start_row(ws))
+    fnt = _font(15 * scale)
+    tmp = Image.new("RGB", (10, 10)); md = ImageDraw.Draw(tmp)
+
+    def tw(s):
+        return md.textlength(str(s), font=fnt)
+
+    pad = 8 * scale
+    caps = {'수업내용': 260 * scale, '다음과제': 200 * scale}
+
+    rows = []  # (날짜, {항목: (값, 색)})
+    for d in dates:
+        top = ac.find_date_block(ws, d)
+        if top is None:
+            continue
+        vals = {}
+        if ac._is_holiday_block(ws, top, last_col):
+            hol = ws.cell(top, ac.STUDENT_FIRST_COL).value
+            for h in STUDENT_COLS:
+                vals[h] = ('' if h != '출석' else hol, RED)
+        else:
+            for h in ('출석', '과제수행', '비고'):
+                c = ws.cell(top + ac.ROW_OFFSET[h], col)
+                vals[h] = (c.value, _cell_color(c))
+            for h in ('수업내용', '다음과제'):
+                c = ws.cell(top + ac.ROW_OFFSET[h], ac.STUDENT_FIRST_COL)
+                vals[h] = (c.value, BLACK)
+        rows.append((d, vals))
+
+    headers = ['날짜'] + STUDENT_COLS
+    col_w = {'날짜': int(max(tw('00/00'), tw('날짜'))) + pad * 2}
+    for h in STUDENT_COLS:
+        w = tw(h)
+        for _, vals in rows:
+            v = vals[h][0]
+            if v not in (None, ''):
+                w = max(w, tw(v))
+        w = int(w) + pad * 2
+        if h in caps:
+            w = min(w, caps[h])
+        col_w[h] = max(w, 52 * scale)
+
+    row_h = 26 * scale
+    W = sum(col_w[h] for h in headers)
+    H = row_h * (1 + len(rows))
+    img = Image.new("RGB", (W + 1, H + 1), WHITE)
+    dr = ImageDraw.Draw(img)
+
+    def cell(x, y, w, h, text, bg=WHITE, color=BLACK):
+        dr.rectangle([x, y, x + w, y + h], fill=bg, outline=GRID, width=max(1, scale // 2))
+        if text in (None, ''):
+            return
+        s = str(text)
+        while s and tw(s) > w - pad * 2:
+            s = s[:-1]
+        bbox = dr.textbbox((0, 0), s, font=fnt)
+        ty = y + (h - (bbox[3] - bbox[1])) // 2 - bbox[1]
+        tx = x + (w - dr.textlength(s, font=fnt)) // 2
+        dr.text((tx, ty), s, font=fnt, fill=color)
+
+    x = 0
+    for h in headers:
+        cell(x, 0, col_w[h], row_h, h, YELLOW); x += col_w[h]
+    y = row_h
+    for dd, vals in rows:
+        x = 0
+        cell(x, y, col_w['날짜'], row_h, dd, CREAM); x += col_w['날짜']
+        for h in STUDENT_COLS:
+            v, c = vals[h]
+            cell(x, y, col_w[h], row_h, v, WHITE, color=c); x += col_w[h]
+        y += row_h
+    return img
+
+
 def render_class_table(cls_name, ws, dates, scale=2, keep=None):
     """cls_name 반의 dates(예: ['7/7','7/8']) 블록을 표 이미지로 그린다.
     keep: 포함할 학생 이름 집합(None이면 전원). 재적 아닌 학생 제외용."""
