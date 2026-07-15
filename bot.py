@@ -557,17 +557,6 @@ def build_preview(wb, parsed):
     missing = sorted(w for w in set(warnings) if w not in life)
     if missing:
         lines.append("\n⚠️ 명단에 없는 이름: " + ", ".join(missing) + " (그대로 두면 무시됩니다)")
-
-    # 출석 관련 항목 중 빠진 게 있으면 비워둘지 되묻기 (학적·시험만 입력한 경우는 제외)
-    daily_fields = ("출석", "수업내용", "과제수행", "다음과제")
-    if any(parsed.get(f) for f in daily_fields):
-        empty_fields = [f for f in daily_fields if not parsed.get(f)]
-        if empty_fields:
-            lines.append(
-                "\n❓ 입력 안 된 항목: <b>" + ", ".join(empty_fields) + "</b>\n"
-                "   비워두는 게 맞으면 그대로 <b>확인</b>, 아니면 내용을 더 알려주세요."
-            )
-
     lines.append("\n맞으면 <b>확인</b>, 아니면 <b>취소</b> 라고 보내주세요.")
     return "\n".join(lines), None
 
@@ -1490,6 +1479,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if warnings:
                 msg += "\n⚠️ " + " / ".join(warnings)
             await update.message.reply_text(msg)
+            # 기록된 내용을 사진으로 한 장 보내 정확히 확인하게 함
+            try:
+                img = rpt.render_class_table(info["sheet"], wb[info["sheet"]], [info["date"]])
+                bio = io.BytesIO(); img.save(bio, "PNG"); bio.seek(0)
+                await update.message.reply_photo(
+                    photo=bio, caption=f"📷 {info['sheet']} · {info['date']} 기록 내용"
+                )
+            except Exception as e:
+                log.warning("기록 사진 전송 실패: %s", e)
             return
         if head in ("취소", "아니", "아니오", "no", "cancel"):
             pending.pop(chat_id)
