@@ -448,6 +448,32 @@ def set_holiday_block(ws, top, last_col, text, label_font=None):
     cell.alignment = Alignment(horizontal='center', vertical='center')
 
 
+def clear_holiday_block(ws, top, last_col):
+    """휴강/공휴일 블록을 보통 빈 블록으로 되돌린다.
+    set_holiday_block 이 서식을 바꾸는 건 왼쪽 위 한 칸(빨간 굵은 글꼴)뿐이므로
+    그 칸만 같은 행의 옆 칸 서식으로 되돌리고, 병합 해제·테두리 통일·가로병합
+    복원은 normalize_block 에 맡긴다. 다른 블록의 서식을 베끼면 그 블록의 결석
+    표시(빨강)까지 따라오므로 그렇게 하지 않는다.
+    지워진 출석 기록까지 되살리지는 못한다."""
+    start = _find_start_row(ws)
+    if start is None or not _is_holiday_block(ws, top, last_col):
+        return False
+    if last_col <= STUDENT_FIRST_COL:
+        return False  # 기준 삼을 옆 칸이 없음
+    bottom = top + BLOCK_SIZE - 1
+    for rng in list(ws.merged_cells.ranges):
+        if (rng.min_row >= top and rng.max_row <= bottom
+                and rng.min_col >= STUDENT_FIRST_COL):
+            ws.unmerge_cells(str(rng))
+    for k in range(BLOCK_SIZE):
+        for c in range(STUDENT_FIRST_COL, last_col + 1):
+            ws.cell(top + k, c).value = None
+        ws.cell(top + k, STUDENT_FIRST_COL)._style = copy(
+            ws.cell(top + k, STUDENT_FIRST_COL + 1)._style)
+    normalize_block(ws, top, last_col, _detect_groups(ws, start, last_col))
+    return True
+
+
 def _is_late(value):
     """지각 값인지: '지각' 이 있거나 'N분'(지각시간) 형식이면 지각."""
     s = str(value)

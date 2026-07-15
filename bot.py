@@ -599,6 +599,8 @@ GUIDE = f"""📋 <b>{SUBJ_NAME} 출석부 봇 사용법</b>
   기록이 있는 블록은 알려만 드리고 손대지 않아요.
 • <b>휴강</b> : <code>7/20 휴강</code> 또는 <code>오늘 휴강</code> → 그 날 수업 있는 반을
   전부 빨간 '휴강'으로 표시해요. (학원 전체 휴강 기준, O/X는 안 써요. 그 날 알림도 안 가요)
+• 잘못 지정했으면 <code>7/20 휴강취소</code> → 보통 칸으로 되돌려요.
+  (단, 휴강 지정 때 지워진 출석 기록은 되살아나지 않아요)
 
 <b>6) 반 개강·종강</b> (반을 통째로 만들거나 종료)
 • 새 반: <code>고3B 신규개강</code> → 요일·알림시간·학생을 차례로 물어봐요. (담당은 따로 <code>담당 고3B</code> 로 지정)
@@ -1327,6 +1329,39 @@ async def handle_holiday_confirm(update: Update, context: ContextTypes.DEFAULT_T
         "그 날은 출석 알림도 안 가요.", parse_mode="HTML")
 
 
+async def undo_holiday(update: Update, context: ContextTypes.DEFAULT_TYPE, date_str):
+    """휴강 지정을 되돌린다. 휴강 블록에는 기록이 없으므로 확인 없이 바로 처리."""
+    wb, path = load_current_wb()
+    if wb is None:
+        await update.message.reply_text("이번 달 출석부가 아직 없어요.")
+        return
+    done, failed, was = [], [], {}
+    for sheet in wb.sheetnames:
+        ws = wb[sheet]
+        top = ac.find_date_block(ws, date_str)
+        if top is None:
+            continue
+        last_col = ac._last_col(ws, ac._find_start_row(ws))
+        if not ac._is_holiday_block(ws, top, last_col):
+            continue
+        was[sheet] = ws.cell(top, ac.STUDENT_FIRST_COL).value
+        (done if ac.clear_holiday_block(ws, top, last_col) else failed).append(sheet)
+    if not done and not failed:
+        await update.message.reply_text(
+            f"<b>{date_str}</b> 은 휴강이 아니에요.", parse_mode="HTML")
+        return
+    if done:
+        wb.save(path)
+    names = {v for v in was.values() if v}
+    msg = f"✅ <b>{date_str}</b> 휴강을 취소했어요. ({', '.join(done)})"
+    if names - {"휴강"}:
+        msg += f"\n(원래 표시: {', '.join(names)})"
+    msg += "\n칸은 비어 있으니 출석을 새로 입력해 주세요."
+    if failed:
+        msg += f"\n⚠️ 되돌릴 기준 블록이 없어 실패: {', '.join(failed)}"
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
 # ── 일반 텍스트 ────────────────────────────────────────────────
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1359,6 +1394,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 점검을 띄우고 다음 메시지까지 확인 응답으로 먹는 걸 막는다.
     if low in ("점검", "정리", "날짜점검"):
         return await start_stray_check(update, context)
+
+    # 휴강 취소 — 반드시 휴강 지정보다 먼저 본다
+    mo = re.match(r"^(?:휴강\s*취소\s+(\S+)|(\S+)\s+휴강\s*취소)$", low)
+    if mo:
+        day = parse_day_token(mo.group(1) or mo.group(2))
+        if day is None:
+            await update.message.reply_text(
+                "날짜를 못 읽었어요. 예) <code>7/20 휴강취소</code>", parse_mode="HTML")
+            return
+        return await undo_holiday(update, context, day)
 
     # 휴강 지정 (예: '7/20 휴강', '휴강 오늘') — 학원 전체 휴강이라 반을 안 받는다
     if low == "휴강":
