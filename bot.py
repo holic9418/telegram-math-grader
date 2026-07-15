@@ -1599,13 +1599,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_report(update, context)
     if any(k in low for k in ("미리보기", "캡처", "보여줘", "보여주", "이미지로")):
         return await cmd_preview(update, context)
-    # '남우현 7월' 처럼 이름+기간만 온 경우도 학생별 미리보기로 (뒤에 다른 말 없을 때만)
+    # '남우현 7월' / '중1AB 이번주' / '초5 7/15' 처럼 (학생|반)+기간, 순서 무관하게 미리보기로
     _period = (r'(?:\d{1,2}\s*월|이번달|지난달|이번주|저번주|지난주|오늘|어제|\d{1,2}[/.]\d{1,2})'
                r'\s*(?:미리보기|보여줘|보여주세요|캡처|이미지로?)?')
-    if re.fullmatch(r'[가-힣]{2,4}\s+' + _period, low):
-        return await cmd_preview(update, context)
-    # '중1AB 이번주', '초5 7/15' 처럼 반+기간만 온 경우도 미리보기로
-    if re.fullmatch(r'(?:초|중|고)\d[a-zA-Z]*(?:\([^)]*\))?\s+' + _period, low):
+    _cls = r'(?:초|중|고)\d[a-zA-Z]*(?:\([^)]*\))?'
+    _stu = r'[가-힣]{2,4}'
+    if any(re.fullmatch(a + r'\s+' + b, low)
+           for a, b in ((_stu, _period), (_period, _stu), (_cls, _period), (_period, _cls))):
         return await cmd_preview(update, context)
     if low in ("생성", "새달", "새달생성"):
         return await cmd_generate(update, context)
