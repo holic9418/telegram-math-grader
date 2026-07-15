@@ -74,6 +74,8 @@ pending: dict[int, dict] = {}
 opening_flow: dict[int, dict] = {}
 # 종강 확인 대기: {chat_id: sheet}
 closing_flow: dict[int, str] = {}
+# 이상 날짜 삭제 확인 대기: {chat_id: [(sheet, top, date), ...]}
+stray_flow: dict[int, list] = {}
 # 잡담용 짧은 기억: {chat_id: [messages]}
 chat_history: dict[int, list] = {}
 
@@ -591,6 +593,8 @@ GUIDE = f"""📋 <b>{SUBJ_NAME} 출석부 봇 사용법</b>
 • 알림 시각을 바꾸려면 <code>알림 초5 21:00</code> 처럼 보내주세요.
 • <b>일정</b> : 반별 수업 요일 보기·변경 (예: <code>일정 고1 화목토</code>)
 • 매일 1시에 밀린 미입력 출석도 한 번 더 알려드려요.
+• <b>점검</b> : 출석부에 이상한 날짜(중복·다른 달)가 있는지 확인하고 정리해요.
+  기록이 있는 블록은 알려만 드리고 손대지 않아요.
 
 <b>6) 반 개강·종강</b> (반을 통째로 만들거나 종료)
 • 새 반: <code>고3B 신규개강</code> → 요일·알림시간·학생을 차례로 물어봐요. (담당은 따로 <code>담당 고3B</code> 로 지정)
@@ -1179,6 +1183,68 @@ async def handle_closing_confirm(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 
+async def start_stray_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """이번 달 파일에서 명백히 잘못된 날짜 블록을 찾아 보여주고 삭제 확인을 받는다."""
+    chat_id = update.effective_chat.id
+    wb, path = load_current_wb()
+    if wb is None:
+        await update.message.reply_text("이번 달 출석부가 아직 없어요.")
+        return
+    _, month = current_ym()
+    empty, kept = [], []
+    for sheet in wb.sheetnames:
+        for s in ac.find_stray_blocks(wb[sheet], month=month):
+            (kept if s['has_data'] else empty).append((sheet, s))
+    if not empty and not kept:
+        await update.message.reply_text("✅ 이상한 날짜 없어요. 전부 깔끔합니다.")
+        return
+
+    lines = []
+    if empty:
+        lines.append("🧹 <b>지울 수 있는 날짜</b> (기록이 비어 있어요)")
+        lines += [f"• {sh} — <b>{s['date']}</b> ({s['reason']})" for sh, s in empty]
+    if kept:
+        lines.append("\n⚠️ <b>기록이 있어서 손대지 않아요</b> — 직접 확인해 주세요")
+        lines += [f"• {sh} — <b>{s['date']}</b> ({s['reason']})" for sh, s in kept]
+    if not empty:
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+
+    stray_flow[chat_id] = [(sh, s['top'], s['date']) for sh, s in empty]
+    lines.append(f"\n비어 있는 {len(empty)}건을 지울까요?\n"
+                 "맞으면 <b>확인</b>, 아니면 <b>취소</b>")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def handle_stray_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
+    chat_id = update.effective_chat.id
+    targets = stray_flow.pop(chat_id)
+    if not text.strip().startswith("확인"):
+        await update.message.reply_text("정리를 취소했어요.")
+        return
+    wb, path = load_current_wb()
+    if wb is None:
+        await update.message.reply_text("이번 달 출석부를 못 찾았어요.")
+        return
+    # 파일이 그새 바뀌었을 수 있으니 지우기 직전에 다시 확인한다.
+    done, skipped = [], []
+    for sheet, top, date in targets:
+        ws = wb[sheet]
+        last_col = ac._last_col(ws, ac._find_start_row(ws))
+        cur = ws.cell(top, 1).value
+        if str(cur).strip() != date or ac.block_has_data(ws, top, last_col):
+            skipped.append(f"{sheet} {date}")
+            continue
+        ac.remove_block(ws, top)
+        done.append(f"{sheet} {date}")
+    if done:
+        wb.save(path)
+    msg = f"✅ {len(done)}건 정리했어요: {', '.join(done)}" if done else "지운 게 없어요."
+    if skipped:
+        msg += f"\n⚠️ 그새 내용이 생겨서 건너뛴 것: {', '.join(skipped)}"
+    await update.message.reply_text(msg)
+
+
 # ── 일반 텍스트 ────────────────────────────────────────────────
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1202,6 +1268,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await handle_opening_step(update, context, text)
     if chat_id in closing_flow:
         return await handle_closing_confirm(update, context, text)
+    if chat_id in stray_flow:
+        return await handle_stray_confirm(update, context, text)
+
+    # 문장 전체가 딱 이 낱말일 때만 — '정리 안 한 학생…' 같은 평범한 말이
+    # 점검을 띄우고 다음 메시지까지 확인 응답으로 먹는 걸 막는다.
+    if low in ("점검", "정리", "날짜점검"):
+        return await start_stray_check(update, context)
 
     # 신규개강 / 종강 트리거 (예: '고3B 신규개강', '고3B 종강')
     mo = re.match(r"^(.+?)\s*(?:신규개강|개강)$", low)

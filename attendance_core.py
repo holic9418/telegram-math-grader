@@ -246,6 +246,60 @@ def find_date_block(ws, date_str):
     return None
 
 
+def block_has_data(ws, top, last_col):
+    """블록(5행)에 실제 기록이 있는지. 날짜·라벨(1·2열)은 제외하고 학생 열만 본다."""
+    for k in range(BLOCK_SIZE):
+        for c in range(STUDENT_FIRST_COL, last_col + 1):
+            if ws.cell(top + k, c).value not in (None, ''):
+                return True
+    return False
+
+
+def find_stray_blocks(ws, month=None):
+    """명백히 잘못된 날짜 블록만 찾는다.
+       - '중복'   : 같은 날짜가 두 번 이상 (첫 번째를 정상으로 보고 이후를 이상으로)
+       - '다른 달' : 파일의 달과 다른 달의 날짜
+    수업요일과 대조하지는 않는다 — 월중 시간표 변경이 정상 운영이라 오탐이 난다.
+    반환: [{'top', 'date', 'reason', 'has_data'}] (행 순서)"""
+    start = _find_start_row(ws)
+    if start is None:
+        return []
+    last_col = _last_col(ws, start)
+    seen, out = set(), []
+    for r in range(start, ws.max_row + 1):
+        v = ws.cell(r, 1).value
+        if not v or not re.match(r'^\d{1,2}/\d{1,2}$', str(v).strip()):
+            continue
+        ds = str(v).strip()
+        reason = None
+        if ds in seen:
+            reason = '중복'
+        elif month is not None and int(ds.split('/')[0]) != month:
+            reason = '다른 달'
+        seen.add(ds)
+        if reason:
+            out.append({'top': r, 'date': ds, 'reason': reason,
+                        'has_data': block_has_data(ws, r, last_col)})
+    return out
+
+
+def remove_block(ws, top):
+    """블록(5행)을 비운다 — 값·테두리·행높이·병합 제거.
+    호출 전에 block_has_data 로 비어 있음을 반드시 확인할 것."""
+    start = _find_start_row(ws)
+    last_col = _last_col(ws, start)
+    bottom = top + BLOCK_SIZE - 1
+    for rng in list(ws.merged_cells.ranges):
+        if rng.min_row >= top and rng.max_row <= bottom:
+            ws.unmerge_cells(str(rng))
+    for r in range(top, bottom + 1):
+        ws.row_dimensions[r].height = None
+        for c in range(1, last_col + 1):
+            cell = ws.cell(r, c)
+            cell.value = None
+            cell.border = Border()
+
+
 def attendance_recorded(ws, date_str):
     """해당 날짜의 출석 행에 기록이 있는지 확인한다.
     반환: True  = 이미 출석 입력됨
