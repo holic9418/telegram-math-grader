@@ -1566,8 +1566,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 그 외 입력은 아래에서 새로 처리 (기존 대기는 덮어씀)
 
     # 한글 키워드를 명령처럼 처리 (슬래시 있어도/없어도)
-    if kw in ("시간표", "수업시간표", "주간시간표") or low in ("내시간표", "내 시간표"):
-        context.args = parts[1:] if kw in ("시간표", "수업시간표", "주간시간표") else ["담당"]
+    if kw in ("시간표", "수업시간표", "주간시간표"):   # '시간표 초5A'
+        context.args = parts[1:]
+        return await cmd_timetable(update, context)
+    _mtt = re.match(r"^(.*?)\s*(?:수업\s*)?시간표$", low)   # '초5A 시간표', '내시간표'
+    if _mtt:
+        pre = _mtt.group(1).strip()
+        context.args = pre.split() if pre else []
         return await cmd_timetable(update, context)
     if kw in ("일정", "스케줄"):
         context.args = parts[1:]
