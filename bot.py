@@ -1597,6 +1597,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_reset_config(update, context)
     if low in ("주간보고서", "보고서", "주간출결"):
         return await cmd_report(update, context)
+    # '7월 15일 원서진 과제' — 끝이 과제/숙제이고 날짜가 있으면 과제 조회
+    if re.search(r"(?:과제|숙제)\s*$", low) and (
+        _resolve_preview_date(low) is not None
+        or any(k in low for k in ("이번주", "저번주", "지난주", "이번달"))
+    ):
+        return await cmd_homework(update, context)
     if any(k in low for k in ("미리보기", "캡처", "보여줘", "보여주", "이미지로")):
         return await cmd_preview(update, context)
     # '남우현 7월' / '중1AB 이번주' / '초5 7/15' 처럼 (학생|반)+기간, 순서 무관하게 미리보기로
@@ -1933,6 +1939,40 @@ async def _preview_student(update, context, name, sheets, text):
         sent += 1
     if sent == 0:
         await update.message.reply_text(f"{name} 학생의 해당 기간 수업일이 없어요.")
+
+
+async def cmd_homework(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'7월 15일 원서진 과제' → 그 학생의 그날 과제수행·다음과제를 챗으로 알려준다."""
+    chat_id = update.effective_chat.id
+    remember_chat(chat_id)
+    text = update.message.text
+    latest, _ = load_latest_wb()
+    if latest is None:
+        await update.message.reply_text("아직 출석부 파일이 없어요.")
+        return
+    name, sheets = _find_student(text, latest)
+    if not name:
+        await update.message.reply_text("누구 과제인지 이름을 알려주세요. 예) 7월 15일 원서진 과제")
+        return
+    d = _resolve_preview_date(text) or datetime.datetime.now(KST).date()
+    ds = f"{d.month}/{d.day}"
+    wb, _, _ = load_wb_for_date(ds)
+    if wb is None:
+        wb = latest
+    lines = [f"📚 <b>{name}</b> · {ds} 과제"]
+    for sheet in sheets:
+        if sheet not in wb.sheetnames:
+            continue
+        ws = wb[sheet]
+        top = ac.find_date_block(ws, ds)
+        col = ac.get_roster(ws).get(name)
+        if top is None or col is None:
+            lines.append(f"[{sheet}] 그 날 수업이 없어요.")
+            continue
+        did = ws.cell(top + ac.ROW_OFFSET["과제수행"], col).value
+        nxt = ws.cell(top + ac.ROW_OFFSET["다음과제"], ac.STUDENT_FIRST_COL).value
+        lines.append(f"[<b>{sheet}</b>] 과제수행: {did or '-'} / 다음과제: {nxt or '-'}")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
