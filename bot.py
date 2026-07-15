@@ -35,6 +35,7 @@ from telegram.ext import (
 
 import attendance_core as ac
 import report as rpt
+import subjects
 
 # ── 설정 ───────────────────────────────────────────────────────
 load_dotenv()
@@ -45,6 +46,11 @@ log = logging.getLogger("attendance-bot")
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-4-8")
+# 과목 선택 (math/english/korean). 없으면 수학.
+SUBJECT = os.environ.get("SUBJECT", "math")
+SUBJ = subjects.get(SUBJECT)
+SUBJ_NAME = SUBJ["display"]         # 예: 'Zest 수학과'
+log.info("과목: %s (%s)", SUBJECT, SUBJ_NAME)
 # 저장 폴더 우선순위: DATA_DIR > Railway 볼륨 자동경로 > 로컬 ./data
 DATA_DIR = (
     os.environ.get("DATA_DIR")
@@ -91,8 +97,8 @@ def load_schedules():
     if os.path.exists(p):
         with open(p, encoding="utf-8") as f:
             return json.load(f)
-    save_schedules(ac.DEFAULT_SCHEDULES)
-    return dict(ac.DEFAULT_SCHEDULES)
+    save_schedules(SUBJ["schedules"])
+    return dict(SUBJ["schedules"])
 
 
 def save_schedules(s):
@@ -111,7 +117,7 @@ def load_times():
     if os.path.exists(p):
         with open(p, encoding="utf-8") as f:
             return json.load(f)
-    default = {k: dict(v) for k, v in ac.DEFAULT_CLASS_TIMES.items()}
+    default = {k: dict(v) for k, v in SUBJ["times"].items()}
     save_times(default)
     return default
 
@@ -505,9 +511,9 @@ def build_preview(wb, parsed):
 
 
 # ── 사용 안내 (처음 시작 시 자동 전송) ─────────────────────────
-GUIDE = """📋 <b>Zest 수학과 출석부 봇 사용법</b>
+GUIDE = f"""📋 <b>{SUBJ_NAME} 출석부 봇 사용법</b>
 
-Zest 수학과 선생님들이 함께 쓰는 출석부예요.
+{SUBJ_NAME} 선생님들이 함께 쓰는 출석부예요.
 <b>선생님이 채팅으로 말씀해 주시면, 봇이 공용 출석부 파일에 자동으로 기록</b>합니다.
 (선생님은 엑셀을 직접 안 여셔도 되고, 봇에게 말로 알려주기만 하면 돼요.)
 
@@ -530,8 +536,8 @@ Zest 수학과 선생님들이 함께 쓰는 출석부예요.
 • <b>남우현 7월</b> 처럼 학생 이름+기간을 주시면, 그 학생의 출결만 정리해 이미지로 보여드려요. (이번주·특정 날짜도 OK)
 
 <b>4) 내 담당 반 지정</b> (중요!)
-• <b>담당 초5 중2</b> 처럼 보내주시면, 그 반 알림만 받게 됩니다.
-• 반 목록: 초3 · 초4 · 초5A · 초5B · 초6A · 초6B · 중1AB · 중1C · 중1보충 · 중2 · 중3 · 고1 · 고2 · 고3
+• <b>담당 초5 중2</b> 처럼 (내 반 이름으로) 보내주시면, 그 반 알림만 받게 됩니다.
+• 반 목록이 궁금하면 <b>담당</b> 이라고만 보내면 보여드려요.
 
 <b>5) 봇이 보내는 알림</b>
 • 수업이 끝나고 <b>15분 뒤까지 출석부 미기입시</b> 담당 쌤에게 알림을 보내드려요.
@@ -1269,9 +1275,10 @@ def generate_weekly_report(target=None):
             return None, 0
         p = os.path.join(DATA_DIR, f)
     wb = ac.load_workbook(p)
-    fname = f"수학과 주간 출결사항 ({monday.month}.{monday.day}~{sunday.month}.{sunday.day}).pdf"
+    fname = f"{SUBJ_NAME} 주간 출결사항 ({monday.month}.{monday.day}~{sunday.month}.{sunday.day}).pdf"
     out = os.path.join(DATA_DIR, fname)
-    n = rpt.build_report_pdf(wb, out, monday, sunday, sunday.year, enroll=load_enroll())
+    n = rpt.build_report_pdf(wb, out, monday, sunday, sunday.year,
+                             title=f"<{SUBJ_NAME} 주간 출결사항>", enroll=load_enroll())
     return (out, n) if n else (None, 0)
 
 
