@@ -182,13 +182,7 @@ def regenerate_month_sheet(ws, year, month, weekday_idxs, hol=None):
         ws.cell(top, 1).value = f'{d.month}/{d.day}'
         ws.merge_cells(start_row=top, start_column=1, end_row=top + BLOCK_SIZE - 1, end_column=1)
         if d in hol:
-            ws.merge_cells(start_row=top, start_column=3,
-                           end_row=top + BLOCK_SIZE - 1, end_column=last_col)
-            cell = ws.cell(top, 3)
-            cell.value = hol[d]
-            base = tpl['label_font']
-            cell.font = Font(name=base.name, size=base.sz, bold=True, color='FFFF0000')
-            cell.alignment = Alignment(horizontal='center', vertical='center')
+            set_holiday_block(ws, top, last_col, hol[d], tpl['label_font'])
         else:
             for rel in MERGE_LABEL_ROWS:
                 for (g0, g1) in tpl['groups']:
@@ -430,6 +424,28 @@ def normalize_block(ws, top, last_col, groups):
 COLOR_RED = 'FFFF0000'
 COLOR_BLUE = 'FF0000FF'
 COLOR_BLACK = 'FF000000'
+
+
+def set_holiday_block(ws, top, last_col, text, label_font=None):
+    """블록을 공휴일/휴강 모양으로 만든다 — 학생 영역 전체를 한 칸으로 병합하고
+    빨간 굵은 글씨로 text. 그 날의 기존 입력은 지워진다(전원 휴강이므로 O/X 불필요).
+    label_font: 기준 글꼴(없으면 라벨 칸에서 읽음)."""
+    bottom = top + BLOCK_SIZE - 1
+    for rng in list(ws.merged_cells.ranges):
+        if (rng.min_row >= top and rng.max_row <= bottom
+                and rng.min_col >= STUDENT_FIRST_COL):
+            ws.unmerge_cells(str(rng))
+    for r in range(top, bottom + 1):
+        for c in range(STUDENT_FIRST_COL, last_col + 1):
+            ws.cell(r, c).value = None
+            _strip_diagonal(ws.cell(r, c))
+    ws.merge_cells(start_row=top, start_column=STUDENT_FIRST_COL,
+                   end_row=bottom, end_column=last_col)
+    cell = ws.cell(top, STUDENT_FIRST_COL)
+    cell.value = text
+    base = label_font or ws.cell(top, 2).font
+    cell.font = Font(name=base.name, size=base.sz, bold=True, color=COLOR_RED)
+    cell.alignment = Alignment(horizontal='center', vertical='center')
 
 
 def _is_late(value):

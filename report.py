@@ -234,13 +234,23 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
         stu_w = [w + q + (1 if i < r else 0) for i, w in enumerate(stu_w)]
     merged_w = sum(stu_w)
 
+    ws_last_col = ac._last_col(ws, ac._find_start_row(ws))
+
     # 1차 계산: 각 칸의 줄 나눔과 행 높이. 전체 이미지 크기를 알아야 그릴 수 있다.
-    blocks = []  # [(날짜, [(라벨텍스트, 라벨, 높이, 병합여부, [(폭, 줄들, 색)])])]
+    blocks = []  # [(날짜, [(라벨텍스트, 라벨, 높이, 병합여부, [(폭, 줄들, 색)])], 휴강텍스트)]
     for dt in dates:
         top = tops[dt]
+        # 공휴일·휴강 블록은 학생 영역 전체가 한 칸으로 병합돼 있다. 값은 왼쪽 위
+        # 칸에만 있으므로 학생별로 읽으면 첫 학생 칸에만 찍힌다 — 따로 처리한다.
+        hol = None
+        if top and ac._is_holiday_block(ws, top, ws_last_col):
+            hc = ws.cell(top, ac.STUDENT_FIRST_COL)
+            hol = (hc.value, _cell_color(hc))
         rows = []
         for k, lab in enumerate(LABELS):
-            if lab in ('수업내용', '다음과제'):
+            if hol:
+                cells, n, merged = [], 1, False
+            elif lab in ('수업내용', '다음과제'):
                 v = ws.cell(top + ac.ROW_OFFSET[lab], ac.STUDENT_FIRST_COL).value if top else None
                 lines = _wrap(md, v, fnt, merged_w - pad * 2) if v not in (None, '') else []
                 cells, n, merged = [(merged_w, lines, BLACK)], len(lines), True
@@ -253,10 +263,10 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
                     n = max(n, len(lines))
                     cells.append((w, lines, _cell_color(c) if c else BLACK))
             rows.append((block_label(top, k), lab, max(row_h, n * line_h + pad), merged, cells))
-        blocks.append((dt, rows))
+        blocks.append((dt, rows, hol))
 
     W = date_w + label_w + merged_w
-    H = row_h + sum(sum(r[2] for r in rows) for _, rows in blocks)
+    H = row_h + sum(sum(r[2] for r in rows) for _, rows, _h in blocks)
     img = Image.new("RGB", (W + 1, H + 1), WHITE)
     d = ImageDraw.Draw(img)
 
@@ -285,7 +295,7 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
 
     # 날짜 블록들
     y = row_h
-    for dt, rows in blocks:
+    for dt, rows, hol in blocks:
         bh = sum(r[2] for r in rows)
         box(0, y, date_w, bh, WHITE, width=scale)  # 날짜 셀 (5행 병합)
         put(0, y, date_w, bh, _wrap(md, dt, fnt, date_w - pad * 2))
@@ -299,6 +309,11 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
                 put(x, ry, w, h, lines, c)
                 x += w
             ry += h
+        if hol:  # 학생 영역 전체를 한 칸으로 (파일의 병합과 같은 모양)
+            hv, hc = hol
+            x0 = date_w + label_w
+            box(x0, y, merged_w, bh, WHITE)
+            put(x0, y, merged_w, bh, _wrap(md, hv, fnt, merged_w - pad * 2), hc)
         y += bh
     return img
 
