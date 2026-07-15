@@ -757,29 +757,71 @@ async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def cmd_timetable(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """반별 수업 요일·수업시간을 요일별 시간표로 보여준다."""
-    remember_chat(update.effective_chat.id)
-    scheds = load_schedules()
-    hours = SUBJ.get("hours", {})
-    closed = set(load_closed())
+def _timetable_byday(classes, active, hours, only_days=None):
+    """요일별 시간표 줄 목록. only_days(요일idx 집합)가 있으면 그 요일만."""
     byday = {i: [] for i in range(7)}
-    for cls, idxs in scheds.items():
-        if cls in closed:
-            continue
-        for i in idxs:
+    for cls in classes:
+        for i in active.get(cls, []):
+            if only_days is not None and i not in only_days:
+                continue
             hr = (hours.get(cls) or {}).get(str(i), "")
             byday[i].append((hr or "99:99", cls, hr))
-    lines = [f"📅 <b>{SUBJ_NAME} 주간 수업 시간표</b>"]
-    any_day = False
+    lines = []
     for i in range(7):
         items = sorted(byday[i], key=lambda x: (x[0], x[1]))
         if not items:
             continue
-        any_day = True
         parts = [f"{cls} {hr}" if hr else cls for _, cls, hr in items]
         lines.append(f"<b>[{WD[i]}]</b>\n  " + "\n  ".join(parts))
-    if not any_day:
+    return lines
+
+
+async def cmd_timetable(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """수업 시간표. 인자로 요일/반/담당 필터 가능."""
+    chat_id = update.effective_chat.id
+    remember_chat(chat_id)
+    scheds = load_schedules()
+    hours = SUBJ.get("hours", {})
+    closed = set(load_closed())
+    active = {c: idxs for c, idxs in scheds.items() if c not in closed}
+    arg = " ".join(context.args).strip() if context.args else ""
+
+    # 1) 담당(내 반)
+    if arg in ("담당", "내반", "내", "나", "내시간표", "내 시간표"):
+        teachers = load_teachers()
+        mine = [c for c in active if chat_id in teachers.get(c, [])]
+        if not mine:
+            await update.message.reply_text("담당으로 지정한 반이 없어요. '담당 초5A' 처럼 먼저 지정하세요.")
+            return
+        lines = [f"📅 <b>{SUBJ_NAME} · 내 담당 시간표</b>"] + _timetable_byday(mine, active, hours)
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+
+    # 2) 요일 필터 (예: '월', '월요일', '월수금')
+    days = parse_weekdays(arg) if arg else []
+    if arg and days and all(ch in "월화수목금토일요일 " for ch in arg):
+        lines = [f"📅 <b>{SUBJ_NAME} · {'·'.join(WD[i] for i in days)} 시간표</b>"]
+        lines += _timetable_byday(list(active), active, hours, only_days=set(days))
+        if len(lines) == 1:
+            lines.append("그 요일에 수업이 없어요.")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+
+    # 3) 반 필터 (예: '초5A')
+    if arg:
+        cls = arg if arg in active else next((c for c in active if c.replace(" ", "") == arg.replace(" ", "")), None)
+        if cls:
+            parts = [f"{WD[i]} {(hours.get(cls) or {}).get(str(i), '')}".strip() for i in sorted(active[cls])]
+            await update.message.reply_text(f"📅 <b>{cls}</b> 수업 시간표\n• " + "\n• ".join(parts), parse_mode="HTML")
+            return
+        await update.message.reply_text(
+            f"'{arg}'를 못 알아들었어요. 예) 시간표 / 시간표 월 / 시간표 초5A / 시간표 담당"
+        )
+        return
+
+    # 4) 전체
+    lines = [f"📅 <b>{SUBJ_NAME} 주간 수업 시간표</b>"] + _timetable_byday(list(active), active, hours)
+    if len(lines) == 1:
         lines.append("아직 등록된 반이 없어요. '일정'으로 요일을 설정하면 여기 모여요.")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
@@ -1524,7 +1566,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 그 외 입력은 아래에서 새로 처리 (기존 대기는 덮어씀)
 
     # 한글 키워드를 명령처럼 처리 (슬래시 있어도/없어도)
-    if low in ("시간표", "수업시간표", "주간시간표"):
+    if kw in ("시간표", "수업시간표", "주간시간표") or low in ("내시간표", "내 시간표"):
+        context.args = parts[1:] if kw in ("시간표", "수업시간표", "주간시간표") else ["담당"]
         return await cmd_timetable(update, context)
     if kw in ("일정", "스케줄"):
         context.args = parts[1:]
