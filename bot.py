@@ -758,32 +758,29 @@ async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_timetable(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """반별 수업 요일·시각을 요일별 시간표로 보여준다."""
+    """반별 수업 요일·수업시간을 요일별 시간표로 보여준다."""
     remember_chat(update.effective_chat.id)
     scheds = load_schedules()
-    times = load_times()
+    hours = SUBJ.get("hours", {})
     closed = set(load_closed())
-    # 요일별로 (시각, 반) 모으기
     byday = {i: [] for i in range(7)}
     for cls, idxs in scheds.items():
         if cls in closed:
             continue
         for i in idxs:
-            t = (times.get(cls) or {}).get(str(i), "")
-            byday[i].append((t, cls))
-    lines = [f"📅 <b>{SUBJ_NAME} 주간 시간표</b>"]
+            hr = (hours.get(cls) or {}).get(str(i), "")
+            byday[i].append((hr or "99:99", cls, hr))
+    lines = [f"📅 <b>{SUBJ_NAME} 주간 수업 시간표</b>"]
     any_day = False
     for i in range(7):
-        items = sorted(byday[i], key=lambda x: (x[0] or "99:99", x[1]))
+        items = sorted(byday[i], key=lambda x: (x[0], x[1]))
         if not items:
             continue
         any_day = True
-        parts = [f"{cls} {t}" if t else cls for t, cls in items]
-        lines.append(f"<b>[{WD[i]}]</b> " + "  ·  ".join(parts))
+        parts = [f"{cls} {hr}" if hr else cls for _, cls, hr in items]
+        lines.append(f"<b>[{WD[i]}]</b>\n  " + "\n  ".join(parts))
     if not any_day:
-        lines.append("아직 등록된 시간표가 없어요. '일정'(요일)·'알림'(시각)으로 설정하면 여기 모여요.")
-    else:
-        lines.append("\n(시각은 출석 확인 알림 시각이에요. 바꾸려면 '알림 반 요일 시각')")
+        lines.append("아직 등록된 반이 없어요. '일정'으로 요일을 설정하면 여기 모여요.")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
