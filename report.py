@@ -214,11 +214,16 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
         if _t:
             all_labels += [block_label(_t, k) for k in range(5)]
     label_w = int(max(tw(l) for l in all_labels)) + pad * 2
+    ws_last_col = ac._last_col(ws, ac._find_start_row(ws))
+    hol_tops = {t for t in tops.values() if t and ac._is_holiday_block(ws, t, ws_last_col)}
+
     # 학생 열 너비: 모든 학생을 같은 폭으로 둔다. 기준은 이름과 O/X 같은 짧은 값뿐
     # — 비고처럼 긴 값까지 반영하면 그 학생 열만 넓어져 표가 뒤틀린다(긴 값은 줄바꿈).
+    # 휴강·공휴일 블록은 제외한다. 그 문구가 출석행 첫 칸에 들어 있어서 같이 재면
+    # ('휴강(폭우)' 등) 학생 열이 통째로 그만큼 넓어진다.
     w = max([tw(n) for n, _ in roster] or [0])
     for _d, top in tops.items():
-        if top is None:
+        if top is None or top in hol_tops:
             continue
         for lab in ('출석', '과제수행'):
             for _n, col in roster:
@@ -234,8 +239,6 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
         stu_w = [w + q + (1 if i < r else 0) for i, w in enumerate(stu_w)]
     merged_w = sum(stu_w)
 
-    ws_last_col = ac._last_col(ws, ac._find_start_row(ws))
-
     # 1차 계산: 각 칸의 줄 나눔과 행 높이. 전체 이미지 크기를 알아야 그릴 수 있다.
     blocks = []  # [(날짜, [(라벨텍스트, 라벨, 높이, 병합여부, [(폭, 줄들, 색)])], 휴강텍스트)]
     for dt in dates:
@@ -243,7 +246,7 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
         # 공휴일·휴강 블록은 학생 영역 전체가 한 칸으로 병합돼 있다. 값은 왼쪽 위
         # 칸에만 있으므로 학생별로 읽으면 첫 학생 칸에만 찍힌다 — 따로 처리한다.
         hol = None
-        if top and ac._is_holiday_block(ws, top, ws_last_col):
+        if top in hol_tops:
             hc = ws.cell(top, ac.STUDENT_FIRST_COL)
             hol = (hc.value, _cell_color(hc))
         rows = []

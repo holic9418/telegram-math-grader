@@ -599,6 +599,7 @@ GUIDE = f"""📋 <b>{SUBJ_NAME} 출석부 봇 사용법</b>
   기록이 있는 블록은 알려만 드리고 손대지 않아요.
 • <b>휴강</b> : <code>7/20 휴강</code> 또는 <code>오늘 휴강</code> → 그 날 수업 있는 반을
   전부 빨간 '휴강'으로 표시해요. (학원 전체 휴강 기준, O/X는 안 써요. 그 날 알림도 안 가요)
+• 사유를 붙이려면 뒤에 적어주세요: <code>7/20 휴강 폭우</code> → '휴강(폭우)' 로 표시돼요.
 • 잘못 지정했으면 <code>7/20 휴강취소</code> → 보통 칸으로 되돌려요.
   (단, 휴강 지정 때 지워진 출석 기록은 되살아나지 않아요)
 
@@ -1264,7 +1265,13 @@ def parse_day_token(tok):
     return f"{int(m.group(1))}/{int(m.group(2))}" if m else None
 
 
-async def start_holiday(update: Update, context: ContextTypes.DEFAULT_TYPE, date_str):
+def holiday_text(reason):
+    """출석부에 적을 문구. 사유가 있으면 '휴강(폭우)' 처럼."""
+    reason = (reason or "").strip()
+    return f"휴강({reason})" if reason else "휴강"
+
+
+async def start_holiday(update: Update, context: ContextTypes.DEFAULT_TYPE, date_str, reason=None):
     """그 날짜에 수업이 있는 모든 반을 휴강으로 지정 — 확인을 받고 적용한다."""
     chat_id = update.effective_chat.id
     wb, path = load_current_wb()
@@ -1291,14 +1298,15 @@ async def start_holiday(update: Update, context: ContextTypes.DEFAULT_TYPE, date
         await update.message.reply_text(msg, parse_mode="HTML")
         return
 
-    lines = [f"🚫 <b>{date_str}</b> 을 휴강으로 지정할까요?",
+    text = holiday_text(reason)
+    lines = [f"🚫 <b>{date_str}</b> 을 <b>{text}</b> 으로 지정할까요?",
              f"대상 {len(targets)}개 반: {', '.join(sh for sh, _ in targets)}"]
     if already:
         lines.append(f"(이미 휴강인 반은 그대로 둬요: {', '.join(already)})")
     if has_data:
         lines.append(f"\n⚠️ <b>이미 입력된 내용이 지워져요</b>: {', '.join(has_data)}")
     lines.append("\n맞으면 <b>확인</b>, 아니면 <b>취소</b>")
-    holiday_flow[chat_id] = {"date": date_str, "targets": targets}
+    holiday_flow[chat_id] = {"date": date_str, "targets": targets, "text": text}
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
@@ -1320,12 +1328,12 @@ async def handle_holiday_confirm(update: Update, context: ContextTypes.DEFAULT_T
         if top is None:
             continue
         last_col = ac._last_col(ws, ac._find_start_row(ws))
-        ac.set_holiday_block(ws, top, last_col, "휴강")
+        ac.set_holiday_block(ws, top, last_col, st["text"])
         done.append(sheet)
     if done:
         wb.save(path)
     await update.message.reply_text(
-        f"✅ <b>{date_str}</b> 휴강으로 지정했어요. ({', '.join(done)})\n"
+        f"✅ <b>{date_str}</b> <b>{st['text']}</b> 으로 지정했어요. ({', '.join(done)})\n"
         "그 날은 출석 알림도 안 가요.", parse_mode="HTML")
 
 
@@ -1411,15 +1419,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "어느 날짜를 휴강으로 할까요? 예) <code>7/20 휴강</code>, <code>오늘 휴강</code>",
             parse_mode="HTML")
         return
-    mo = re.match(r"^(?:휴강\s+(\S+)|(\S+)\s+휴강)$", low)
+    # 사유는 선택 — '7/20 휴강 폭우' 처럼 뒤에 붙인다
+    mo = re.match(r"^(?:휴강\s+(\S+)(?:\s+(.+))?|(\S+)\s+휴강(?:\s+(.+))?)$", low)
     if mo:
-        day = parse_day_token(mo.group(1) or mo.group(2))
+        day = parse_day_token(mo.group(1) or mo.group(3))
+        reason = (mo.group(2) or mo.group(4) or "").strip()
         if day is None:
             await update.message.reply_text(
-                "날짜를 못 읽었어요. 예) <code>7/20 휴강</code>, <code>오늘 휴강</code>",
+                "날짜를 못 읽었어요. 예) <code>7/20 휴강</code>, <code>오늘 휴강 폭우</code>",
                 parse_mode="HTML")
             return
-        return await start_holiday(update, context, day)
+        if reason == "취소":  # '휴강 7/20 취소' — 위 취소 정규식이 못 잡는 어순
+            return await undo_holiday(update, context, day)
+        return await start_holiday(update, context, day, reason)
 
     # 신규개강 / 종강 트리거 (예: '고3B 신규개강', '고3B 종강')
     mo = re.match(r"^(.+?)\s*(?:신규개강|개강)$", low)
