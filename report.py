@@ -121,7 +121,7 @@ def render_student_table(name, ws, dates, scale=2):
         rows.append((d, vals))
 
     headers = ['날짜'] + STUDENT_COLS
-    col_w = {'날짜': int(max(tw('00/00'), tw('날짜'))) + pad * 2}
+    col_w = {'날짜': int(max(tw('00/00(월)'), tw('날짜'))) + pad * 2}
     for h in STUDENT_COLS:
         w = tw(h)
         for _, vals in rows:
@@ -171,7 +171,7 @@ def render_student_table(name, ws, dates, scale=2):
     y = row_h
     for dd, cells, rh in laid:
         x = 0
-        cell(x, y, col_w['날짜'], rh, dd, CREAM); x += col_w['날짜']
+        cell(x, y, col_w['날짜'], rh, ac.date_label(dd), CREAM); x += col_w['날짜']
         for h in STUDENT_COLS:
             lines, c = cells[h]
             dr.rectangle([x, y, x + col_w[h], y + rh], fill=WHITE, outline=GRID,
@@ -199,7 +199,7 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
     line_h = asc + desc + 2 * scale
     row_h = 26 * scale          # 한 줄짜리 행의 기본 높이
     merged_min_w = 360 * scale  # 학생 수가 적어도 수업내용이 과하게 접히지 않도록
-    date_w = int(max(tw("00/00"), 40 * scale)) + pad * 2
+    date_w = int(max(tw("00/00(월)"), 40 * scale)) + pad * 2
 
     def block_label(top, k):
         """블록의 실제 B열 라벨(비고→일일test 등 반영). 없으면 기본 LABELS."""
@@ -301,7 +301,7 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
     for dt, rows, hol in blocks:
         bh = sum(r[2] for r in rows)
         box(0, y, date_w, bh, WHITE, width=scale)  # 날짜 셀 (5행 병합)
-        put(0, y, date_w, bh, _wrap(md, dt, fnt, date_w - pad * 2))
+        put(0, y, date_w, bh, _wrap(md, ac.date_label(dt), fnt, date_w - pad * 2))
         ry = y
         for lab_text, lab, h, merged, cells in rows:
             rowbg = CREAM if lab == '출석' else WHITE
@@ -352,18 +352,17 @@ def week_dates(ws, monday, sunday, year):
     start = ac._find_start_row(ws)
     if start is None:
         return out
-    import re
     for r in range(start, ws.max_row + 1):
-        v = ws.cell(r, 1).value
-        if v and re.match(r'^\d{1,2}/\d{1,2}$', str(v).strip()):
-            ds = str(v).strip()
-            m, dd = map(int, ds.split('/'))
-            try:
-                d = datetime.date(year, m, dd)
-            except ValueError:
-                continue
-            if monday <= d <= sunday:
-                out.append(ds)
+        k = ac.date_key(ws.cell(r, 1).value)
+        if not k:
+            continue
+        m, dd = map(int, k.split('/'))
+        try:
+            d = datetime.date(year, m, dd)
+        except ValueError:
+            continue
+        if monday <= d <= sunday:
+            out.append(k)
     return out
 
 

@@ -60,11 +60,35 @@ BLOCK_LABELS = ['출석', '수업내용', '과제수행', '다음과제', '비�
 BLOCK_SIZE = len(BLOCK_LABELS)
 
 
+_DATE_AT_START = re.compile(r'^\s*(\d{1,2})/(\d{1,2})')
+
+
+def date_key(v):
+    """셀/문자열에서 'M/D' 추출. '7/15(화)','7/15' → '7/15'. 아니면 None.
+    (날짜 옆 요일 표기가 있어도 인식하기 위한 정규화 키)"""
+    if v is None:
+        return None
+    m = _DATE_AT_START.match(str(v).strip())
+    return f"{int(m.group(1))}/{int(m.group(2))}" if m else None
+
+
+def date_label(md, year=None):
+    """'7/15' → '7/15(화)'. 요일을 계산해 붙인다."""
+    k = date_key(md)
+    if not k:
+        return str(md)
+    mm, dd = map(int, k.split('/'))
+    try:
+        wd = WEEKDAY_KR[datetime.date(year or datetime.date.today().year, mm, dd).weekday()]
+        return f"{mm}/{dd}({wd})"
+    except ValueError:
+        return k
+
+
 def _find_start_row(ws):
     """col A 에 날짜가 처음 등장하는 행 = 첫 블록 시작행."""
     for r in range(1, ws.max_row + 1):
-        v = ws.cell(r, 1).value
-        if v and re.match(r'^\d{1,2}/\d{1,2}$', str(v).strip()):
+        if date_key(ws.cell(r, 1).value):
             return r
     return None
 
@@ -88,9 +112,9 @@ def infer_schedule(ws):
     days = set()
     year = datetime.date.today().year
     for r in range(start, ws.max_row + 1):
-        v = ws.cell(r, 1).value
-        if v and re.match(r'^\d{1,2}/\d{1,2}$', str(v).strip()):
-            mm, dd = str(v).split('/')
+        k = date_key(ws.cell(r, 1).value)
+        if k:
+            mm, dd = k.split('/')
             try:
                 days.add(datetime.date(year, int(mm), int(dd)).weekday())
             except ValueError:
@@ -160,13 +184,29 @@ def regenerate_month_sheet(ws, year, month, weekday_idxs, hol=None):
     # 1) 블록 영역(>= start)의 기존 병합 모두 해제
     for rng in list(ws.merged_cells.ranges):
         if rng.max_row >= start:
-            ws.unmerge_cells(str(rng))
+            try:
+                ws.unmerge_cells(str(rng))
+            except KeyError:
+                # openpyxl이 미실체화 셀 병합을 못 지우는 버그 → 강제 정상화
+                try:
+                    ws.merged_cells.ranges.discard(rng)
+                except Exception:
+                    try:
+                        ws.merged_cells.ranges.remove(rng)
+                    except Exception:
+                        pass
+                for rr in range(rng.min_row, rng.max_row + 1):
+                    for cc in range(rng.min_col, rng.max_col + 1):
+                        if isinstance(ws._cells.get((rr, cc)), MergedCell):
+                            del ws._cells[(rr, cc)]
 
     # 2) 블록 영역 값 비우기 (넉넉히)
     max_clear = start + BLOCK_SIZE * (len(days) + 4)
     for r in range(start, max(max_clear, ws.max_row) + 1):
         for c in range(1, last_col + 1):
-            ws.cell(r, c).value = None
+            cell = ws.cell(r, c)
+            if not isinstance(cell, MergedCell):
+                cell.value = None
 
     # 3) 새 블록 기록
     for i, d in enumerate(days):
@@ -174,12 +214,14 @@ def regenerate_month_sheet(ws, year, month, weekday_idxs, hol=None):
         for k in range(BLOCK_SIZE):
             r = top + k
             for c in range(1, last_col + 1):
+                if isinstance(ws.cell(r, c), MergedCell):
+                    continue
                 ws.cell(r, c)._style = copy(tpl['styles'][k][c])
                 _strip_diagonal(ws.cell(r, c))
             if tpl['heights'][k] is not None:
                 ws.row_dimensions[r].height = tpl['heights'][k]
             ws.cell(r, 2).value = BLOCK_LABELS[k]
-        ws.cell(top, 1).value = f'{d.month}/{d.day}'
+        ws.cell(top, 1).value = f'{d.month}/{d.day}({WEEKDAY_KR[d.weekday()]})'
         ws.merge_cells(start_row=top, start_column=1, end_row=top + BLOCK_SIZE - 1, end_column=1)
         if d in hol:
             set_holiday_block(ws, top, last_col, hol[d], tpl['label_font'])
@@ -230,12 +272,13 @@ def get_roster(ws):
 
 
 def find_date_block(ws, date_str):
-    """'8/4' 같은 날짜의 블록 시작행 반환 (없으면 None)."""
+    """'8/4'(또는 '8/4(화)') 같은 날짜의 블록 시작행 반환 (없으면 None)."""
     start = _find_start_row(ws)
-    target = str(date_str).strip()
+    target = date_key(date_str)
+    if target is None or start is None:
+        return None
     for r in range(start, ws.max_row + 1):
-        v = ws.cell(r, 1).value
-        if v and str(v).strip() == target:
+        if date_key(ws.cell(r, 1).value) == target:
             return r
     return None
 
@@ -261,10 +304,9 @@ def find_stray_blocks(ws, month=None):
     last_col = _last_col(ws, start)
     seen, out = set(), []
     for r in range(start, ws.max_row + 1):
-        v = ws.cell(r, 1).value
-        if not v or not re.match(r'^\d{1,2}/\d{1,2}$', str(v).strip()):
+        ds = date_key(ws.cell(r, 1).value)
+        if not ds:
             continue
-        ds = str(v).strip()
         reason = None
         if ds in seen:
             reason = '중복'
@@ -360,9 +402,9 @@ def sheet_dates(wb):
         ds = []
         if start:
             for r in range(start, ws.max_row + 1):
-                v = ws.cell(r, 1).value
-                if v and re.match(r'^\d{1,2}/\d{1,2}$', str(v).strip()):
-                    ds.append(str(v).strip())
+                k = date_key(ws.cell(r, 1).value)
+                if k:
+                    ds.append(k)
         out[name] = ds
     return out
 
