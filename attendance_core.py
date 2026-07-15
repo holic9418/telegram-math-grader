@@ -495,6 +495,24 @@ def add_student(ws, name):
     return new_col
 
 
+def create_class_sheet(wb, name, roster, weekday_idxs, year, month, template=None):
+    """새 반 시트를 만든다. 기존 시트를 복제해 명단·수업요일에 맞게 정리.
+       - template: 구조 복제용 기준 시트(없으면 첫 시트)
+       - roster: 학생 이름 목록 (빈 리스트면 명단 없는 빈 시트)
+       반환: 생성된 시트 이름. 이미 있으면 ValueError."""
+    if name in wb.sheetnames:
+        raise ValueError(f"이미 있는 반이에요: {name}")
+    if not wb.sheetnames:
+        raise ValueError("구조를 복제할 기준 시트가 없어요.")
+    tmpl = template if template in wb.sheetnames else wb.sheetnames[0]
+    new = wb.copy_worksheet(wb[tmpl])
+    new.title = name
+    if roster:
+        set_roster(wb, name, roster)
+    regenerate_month_sheet(wb[name], year, month, weekday_idxs)
+    return name
+
+
 def set_roster(wb, sheet, target_names):
     """시트의 학생 명단을 target_names(순서대로)로 맞춘다.
        - 열 수를 늘리거나(끝 학생 서식 복사) 줄이고, 헤더에 이름을 채운다.

@@ -70,6 +70,10 @@ BACKLOG_SINCE = datetime.date(2026, 7, 13)
 
 # 확인/취소 대기 중인 입력: {chat_id: {"sheet","date","data","warnings"}}
 pending: dict[int, dict] = {}
+# 신규개강 단계 진행 중: {chat_id: {"sheet","step","weekdays","time","students"}}
+opening_flow: dict[int, dict] = {}
+# 종강 확인 대기: {chat_id: sheet}
+closing_flow: dict[int, str] = {}
 # 잡담용 짧은 기억: {chat_id: [messages]}
 chat_history: dict[int, list] = {}
 
@@ -254,6 +258,45 @@ def save_enroll(e):
         json.dump(e, f, ensure_ascii=False, indent=2)
 
 
+def closed_path():
+    return os.path.join(DATA_DIR, "closed_classes.json")
+
+
+def load_closed():
+    """{반: 'M/D'} — 종강한 반과 종강일. 그 주 이후 입력 차단·다음달 제외."""
+    p = closed_path()
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_closed(c):
+    with open(closed_path(), "w", encoding="utf-8") as f:
+        json.dump(c, f, ensure_ascii=False, indent=2)
+
+
+def parse_weekdays(text):
+    """'월수금'/'월 수 금'/'화목토' → 정렬된 요일 인덱스 목록."""
+    base = str(text).replace("요일", "")
+    return sorted({WD.index(ch) for ch in base if ch in WD})
+
+
+def class_input_blocked(sheet, date_str):
+    """종강한 반의 '종강 주 이후' 날짜면 True(입력 차단)."""
+    closed = load_closed().get(sheet)
+    if not closed:
+        return False
+    y = datetime.date.today().year
+    try:
+        cm, cd = map(int, str(closed).split("/"))
+        dm, dd = map(int, str(date_str).split("/"))
+    except ValueError:
+        return False
+    _, csun = rpt.week_bounds(datetime.date(y, cm, cd))
+    return datetime.date(y, dm, dd) > csun
+
+
 def apply_enroll_events(sheet, date_str, life):
     """학적 이벤트를 enrollments.json 에 반영. life={학생: 유형}."""
     e = load_enroll()
@@ -340,6 +383,10 @@ def generate_month_file(year, month):
     scheds = load_schedules()
     schedules = {k: v for k, v in scheds.items() if k in src.sheetnames}
     wb = ac.generate_month(src, year, month, schedules)
+    # 종강한 반은 새 달 파일에서 제외
+    for sheet in list(load_closed()):
+        if sheet in wb.sheetnames and len(wb.sheetnames) > 1:
+            del wb[sheet]
     # 퇴원·전출(재적 to 설정) 학생은 새 달 명단에서 제거
     enroll = load_enroll()
     for sheet in list(wb.sheetnames):
@@ -544,6 +591,11 @@ GUIDE = f"""📋 <b>{SUBJ_NAME} 출석부 봇 사용법</b>
 • 알림 시각을 바꾸려면 <code>알림 초5 21:00</code> 처럼 보내주세요.
 • <b>일정</b> : 반별 수업 요일 보기·변경 (예: <code>일정 고1 화목토</code>)
 • 매일 1시에 밀린 미입력 출석도 한 번 더 알려드려요.
+
+<b>6) 반 개강·종강</b> (반을 통째로 만들거나 종료)
+• 새 반: <code>고3B 신규개강</code> → 요일·알림시간·학생을 차례로 물어봐요. (담당은 따로 <code>담당 고3B</code> 로 지정)
+• 반 종료: <code>고3B 종강</code> → 이번 주까지만 입력, 다음 주부터 중단 + 다음 달 파일엔 제외.
+• (학생 한 명만 추가/제외는 '신규등록'·'퇴원'이에요. 개강·종강은 반 자체를 만들거나 없애는 거예요.)
 
 궁금하면 아무 때나 <b>도움말</b> 이라고 보내주시면 이 안내가 다시 떠요. 🙂
 
@@ -989,6 +1041,144 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ── 신규개강 / 종강 (반 단위) ──────────────────────────────────
+async def start_opening(update: Update, context: ContextTypes.DEFAULT_TYPE, sheet):
+    chat_id = update.effective_chat.id
+    wb, _ = load_current_wb()
+    if wb is None:
+        await update.message.reply_text("이번 달 출석부 파일이 없어요. 먼저 파일을 보내거나 /생성 해주세요.")
+        return
+    if sheet in wb.sheetnames:
+        await update.message.reply_text(f"'{sheet}' 반은 이미 있어요. 새로 만들 필요 없어요.")
+        return
+    opening_flow[chat_id] = {"sheet": sheet, "step": "weekdays"}
+    await update.message.reply_text(
+        f"🆕 <b>{sheet}</b> 반을 개강할게요. (취소하려면 '취소')\n\n"
+        "1️⃣ 수업 요일을 알려주세요. 예) <code>월수금</code>",
+        parse_mode="HTML",
+    )
+
+
+async def handle_opening_step(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
+    chat_id = update.effective_chat.id
+    st = opening_flow[chat_id]
+    if text.strip() in ("취소", "그만", "cancel"):
+        opening_flow.pop(chat_id)
+        await update.message.reply_text("개강을 취소했어요.")
+        return
+    step = st["step"]
+    if step == "weekdays":
+        wds = parse_weekdays(text)
+        if not wds:
+            await update.message.reply_text("요일을 못 알아들었어요. 예) 월수금")
+            return
+        st["weekdays"] = wds
+        st["step"] = "time"
+        await update.message.reply_text(
+            f"요일: {'·'.join(WD[i] for i in wds)}\n\n"
+            "2️⃣ 출석 미입력 알림을 언제 보낼까요? 예) <code>저녁 9시</code>  (필요 없으면 '없음')",
+            parse_mode="HTML",
+        )
+    elif step == "time":
+        if text.strip() in ("없음", "없어", "스킵", "건너뛰기", "skip"):
+            st["time"] = None
+        else:
+            hhmm = parse_time_token(text)
+            if not hhmm:
+                await update.message.reply_text("시간을 못 알아들었어요. 예) 저녁 9시  (또는 '없음')")
+                return
+            st["time"] = hhmm
+        st["step"] = "students"
+        await update.message.reply_text(
+            "3️⃣ 학생 명단을 알려주세요. 예) <code>김철수, 이영희, 박민수</code>  (없으면 '없음')",
+            parse_mode="HTML",
+        )
+    elif step == "students":
+        if text.strip() in ("없음", "없어", "나중에"):
+            st["students"] = []
+        else:
+            st["students"] = [n.strip() for n in re.split(r"[,\n]+", text) if n.strip()]
+        st["step"] = "confirm"
+        wd = "·".join(WD[i] for i in st["weekdays"])
+        tm = st["time"] or "없음"
+        stu = ", ".join(st["students"]) if st["students"] else "(없음 — 나중에 신규등록)"
+        await update.message.reply_text(
+            f"이렇게 개강할게요:\n"
+            f"• 반: <b>{st['sheet']}</b>\n• 요일: {wd}\n• 알림: {tm}\n• 학생: {stu}\n\n"
+            "맞으면 <b>확인</b>, 아니면 <b>취소</b>",
+            parse_mode="HTML",
+        )
+    elif step == "confirm":
+        if not text.strip().startswith("확인"):
+            await update.message.reply_text("'확인' 또는 '취소' 라고 보내주세요.")
+            return
+        opening_flow.pop(chat_id)
+        wb, path = load_current_wb()
+        if wb is None:
+            await update.message.reply_text("이번 달 파일이 없어요.")
+            return
+        today = datetime.datetime.now(KST).date()
+        try:
+            ac.create_class_sheet(wb, st["sheet"], st["students"], st["weekdays"], today.year, today.month)
+        except ValueError as e:
+            await update.message.reply_text(f"⚠️ {e}")
+            return
+        wb.save(path)
+        sch = load_schedules(); sch[st["sheet"]] = st["weekdays"]; save_schedules(sch)
+        if st["time"]:
+            tms = load_times(); tms[st["sheet"]] = {str(d): st["time"] for d in st["weekdays"]}; save_times(tms)
+        cl = load_closed()
+        if cl.pop(st["sheet"], None) is not None:
+            save_closed(cl)
+        await update.message.reply_text(
+            f"✅ <b>{st['sheet']}</b> 개강 완료! 이제 출석 입력이 가능해요.\n"
+            f"⚠️ 아직 <b>담당 선생님이 없어요.</b> 담당쌤이 <code>담당 {st['sheet']}</code> 라고 보내 지정해 주세요.",
+            parse_mode="HTML",
+        )
+        admin = get_admin()
+        if admin and admin != chat_id:
+            try:
+                await context.bot.send_message(
+                    admin,
+                    f"🆕 '{st['sheet']}' 반이 개강됐어요. 담당 지정이 필요해요 (담당쌤이 '담당 {st['sheet']}').",
+                )
+            except Exception:
+                pass
+
+
+async def start_closing(update: Update, context: ContextTypes.DEFAULT_TYPE, sheet):
+    chat_id = update.effective_chat.id
+    wb, _ = load_current_wb()
+    if wb is None or sheet not in wb.sheetnames:
+        await update.message.reply_text(f"'{sheet}' 반을 못 찾았어요.")
+        return
+    closing_flow[chat_id] = sheet
+    await update.message.reply_text(
+        f"🛑 <b>{sheet}</b> 반을 종강할까요?\n"
+        "이번 주까지는 입력되고, <b>다음 주부터 입력 중단</b> + <b>다음 달 파일엔 제외</b>돼요.\n"
+        "(이번 달 기록은 그대로 남아요)\n\n맞으면 <b>확인</b>, 아니면 <b>취소</b>",
+        parse_mode="HTML",
+    )
+
+
+async def handle_closing_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
+    chat_id = update.effective_chat.id
+    sheet = closing_flow[chat_id]
+    if not text.strip().startswith("확인"):
+        closing_flow.pop(chat_id)
+        await update.message.reply_text("종강을 취소했어요.")
+        return
+    closing_flow.pop(chat_id)
+    today = datetime.datetime.now(KST).date()
+    cl = load_closed()
+    cl[sheet] = f"{today.month}/{today.day}"
+    save_closed(cl)
+    await update.message.reply_text(
+        f"✅ <b>{sheet}</b> 종강 처리했어요.\n다음 주부터 입력이 멈추고, 다음 달 파일엔 빠집니다.",
+        parse_mode="HTML",
+    )
+
+
 # ── 일반 텍스트 ────────────────────────────────────────────────
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1006,6 +1196,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 승인된 멤버만 사용 가능 (관리자 등록만 예외로 통과)
     if low not in ("관리자등록", "관리자", "관리자설정") and not await gate_member(update, context):
         return
+
+    # 개강/종강 진행 중이면 그 단계 처리
+    if chat_id in opening_flow:
+        return await handle_opening_step(update, context, text)
+    if chat_id in closing_flow:
+        return await handle_closing_confirm(update, context, text)
+
+    # 신규개강 / 종강 트리거 (예: '고3B 신규개강', '고3B 종강')
+    mo = re.match(r"^(.+?)\s*(?:신규개강|개강)$", low)
+    if mo:
+        return await start_opening(update, context, mo.group(1).strip())
+    mc = re.match(r"^(.+?)\s*종강$", low)
+    if mc:
+        return await start_closing(update, context, mc.group(1).strip())
 
     # 확인/취소 대기 처리 (확인 뒤에 추가 정보가 붙어도 인식하고 병합)
     if chat_id in pending:
@@ -1115,6 +1319,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if target_wb is None:
         await update.message.reply_text(
             f"{month}월 출석부 파일이 없어요. 먼저 파일을 보내거나 /생성 해주세요."
+        )
+        return
+
+    if class_input_blocked(parsed.get("sheet"), parsed.get("date", "")):
+        await update.message.reply_text(
+            f"🛑 '{parsed.get('sheet')}' 반은 종강해서 그 날짜는 입력할 수 없어요."
         )
         return
 
