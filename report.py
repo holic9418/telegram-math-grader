@@ -18,12 +18,14 @@ BLUE = (0, 0, 210)
 GRID = (120, 120, 120)
 LABELS = ['출석', '수업내용', '과제수행', '다음과제', '비고']
 
-# 폰트 후보 (배포: fonts-nanum / 로컬 윈도우: malgun)
+# 폰트 후보 (배포: fonts-nanum / 로컬 윈도우: malgun / 로컬 맥: AppleSDGothicNeo)
 FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
     "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
     r"C:\Windows\Fonts\malgun.ttf",
     r"C:\Windows\Fonts\malgunbd.ttf",
+    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+    "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
 ]
 
 
@@ -53,6 +55,31 @@ def _cell_color(cell):
     except Exception:
         pass
     return BLACK
+
+
+def _wrap(md, s, font, max_w):
+    """max_w(px) 안에 들어가도록 줄을 나눈다.
+    공백에서 먼저 끊고, 한 낱말이 그보다 길면 글자 단위로 끊는다."""
+    lines = []
+    for para in str(s).split("\n"):
+        cur = ""
+        for word in para.split(" "):
+            cand = cur + " " + word if cur else word
+            if md.textlength(cand, font=font) <= max_w:
+                cur = cand
+                continue
+            if cur:
+                lines.append(cur)
+                cur = ""
+            while md.textlength(word, font=font) > max_w and len(word) > 1:
+                cut = 1
+                while cut < len(word) and md.textlength(word[:cut + 1], font=font) <= max_w:
+                    cut += 1
+                lines.append(word[:cut])
+                word = word[cut:]
+            cur = word
+        lines.append(cur)
+    return lines or [""]
 
 
 STUDENT_COLS = ['출석', '과제수행', '수업내용', '다음과제', '비고']
@@ -107,50 +134,71 @@ def render_student_table(name, ws, dates, scale=2):
         col_w[h] = max(w, 52 * scale)
 
     row_h = 26 * scale
+    asc, desc = fnt.getmetrics()
+    line_h = asc + desc + 2 * scale
+
+    # 1차 계산: 각 칸의 줄 나눔과 행 높이. caps에 걸려 잘리는 대신 줄을 접는다.
+    laid = []  # [(날짜, {항목: (줄들, 색)}, 행높이)]
+    for dd, vals in rows:
+        cells, n = {}, 1
+        for h in STUDENT_COLS:
+            v, c = vals[h]
+            lines = _wrap(md, v, fnt, col_w[h] - pad * 2) if v not in (None, '') else []
+            n = max(n, len(lines))
+            cells[h] = (lines, c)
+        laid.append((dd, cells, max(row_h, n * line_h + pad)))
+
     W = sum(col_w[h] for h in headers)
-    H = row_h * (1 + len(rows))
+    H = row_h + sum(r[2] for r in laid)
     img = Image.new("RGB", (W + 1, H + 1), WHITE)
     dr = ImageDraw.Draw(img)
 
+    def put(x, y, w, h, lines, color=BLACK):
+        """세로 가운데 정렬로 여러 줄을 그린다."""
+        ty = y + (h - len(lines) * line_h) // 2
+        for i, ln in enumerate(lines):
+            tx = x + (w - dr.textlength(ln, font=fnt)) // 2
+            dr.text((tx, ty + i * line_h), ln, font=fnt, fill=color)
+
     def cell(x, y, w, h, text, bg=WHITE, color=BLACK):
         dr.rectangle([x, y, x + w, y + h], fill=bg, outline=GRID, width=max(1, scale // 2))
-        if text in (None, ''):
-            return
-        s = str(text)
-        while s and tw(s) > w - pad * 2:
-            s = s[:-1]
-        bbox = dr.textbbox((0, 0), s, font=fnt)
-        ty = y + (h - (bbox[3] - bbox[1])) // 2 - bbox[1]
-        tx = x + (w - dr.textlength(s, font=fnt)) // 2
-        dr.text((tx, ty), s, font=fnt, fill=color)
+        if text not in (None, ''):
+            put(x, y, w, h, _wrap(md, text, fnt, w - pad * 2), color)
 
     x = 0
     for h in headers:
         cell(x, 0, col_w[h], row_h, h, YELLOW); x += col_w[h]
     y = row_h
-    for dd, vals in rows:
+    for dd, cells, rh in laid:
         x = 0
-        cell(x, y, col_w['날짜'], row_h, dd, CREAM); x += col_w['날짜']
+        cell(x, y, col_w['날짜'], rh, dd, CREAM); x += col_w['날짜']
         for h in STUDENT_COLS:
-            v, c = vals[h]
-            cell(x, y, col_w[h], row_h, v, WHITE, color=c); x += col_w[h]
-        y += row_h
+            lines, c = cells[h]
+            dr.rectangle([x, y, x + col_w[h], y + rh], fill=WHITE, outline=GRID,
+                         width=max(1, scale // 2))
+            put(x, y, col_w[h], rh, lines, c)
+            x += col_w[h]
+        y += rh
     return img
 
 
 def render_class_table(cls_name, ws, dates, scale=2, keep=None):
     """cls_name 반의 dates(예: ['7/7','7/8']) 블록을 표 이미지로 그린다.
-    keep: 포함할 학생 이름 집합(None이면 전원). 재적 아닌 학생 제외용."""
+    keep: 포함할 학생 이름 집합(None이면 전원). 재적 아닌 학생 제외용.
+    내용이 칸보다 길면 칸 안에서 줄바꿈하고, 그만큼 행 높이를 늘린다."""
     roster = [(n, c) for n, c in ac.get_roster(ws).items()
               if keep is None or n in keep]  # [(name, col), ...] 열 순서
     fnt = _font(15 * scale)
-    fnt_b = _font(15 * scale)
     tmp = Image.new("RGB", (10, 10)); md = ImageDraw.Draw(tmp)
 
     def tw(s):
         return md.textlength(str(s), font=fnt)
 
     pad = 8 * scale
+    asc, desc = fnt.getmetrics()
+    line_h = asc + desc + 2 * scale
+    row_h = 26 * scale          # 한 줄짜리 행의 기본 높이
+    merged_min_w = 360 * scale  # 학생 수가 적어도 수업내용이 과하게 접히지 않도록
     date_w = int(max(tw("00/00"), 40 * scale)) + pad * 2
 
     def block_label(top, k):
@@ -158,46 +206,75 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
         v = ws.cell(top + k, 2).value if top else None
         return str(v) if v not in (None, "") else LABELS[k]
 
+    tops = {d: ac.find_date_block(ws, d) for d in dates}
+
     # 라벨 열 너비: 기본 라벨 + 이번 주 블록들의 실제 라벨 중 최대
     all_labels = list(LABELS)
-    for _d in dates:
-        _t = ac.find_date_block(ws, _d)
+    for _d, _t in tops.items():
         if _t:
             all_labels += [block_label(_t, k) for k in range(5)]
     label_w = int(max(tw(l) for l in all_labels)) + pad * 2
-    # 학생 열 너비: 이름/값 중 최대 (수업내용·다음과제 제외 = 병합)
-    stu_w = []
-    for name, col in roster:
-        w = tw(name)
-        for d in dates:
-            top = ac.find_date_block(ws, d)
-            if top is None:
-                continue
-            for lab in ('출석', '과제수행', '비고'):
+    # 학생 열 너비: 모든 학생을 같은 폭으로 둔다. 기준은 이름과 O/X 같은 짧은 값뿐
+    # — 비고처럼 긴 값까지 반영하면 그 학생 열만 넓어져 표가 뒤틀린다(긴 값은 줄바꿈).
+    w = max([tw(n) for n, _ in roster] or [0])
+    for _d, top in tops.items():
+        if top is None:
+            continue
+        for lab in ('출석', '과제수행'):
+            for _n, col in roster:
                 v = ws.cell(top + ac.ROW_OFFSET[lab], col).value
                 if v is not None:
                     w = max(w, tw(v))
-        stu_w.append(min(max(int(w) + pad * 2, 55 * scale), 240 * scale))
+    stu_w = [max(int(w) + pad * 2, 55 * scale)] * len(roster)
 
-    row_h = 26 * scale
-    W = date_w + label_w + sum(stu_w)
-    H = row_h * (1 + 5 * len(dates))
+    # 수업내용·다음과제는 학생 열 전체를 병합해 쓴다. 이 폭이 너무 좁으면 줄이
+    # 과하게 접히므로, 모자란 만큼 학생 열에 고루 나눠 넓힌다.
+    if stu_w and sum(stu_w) < merged_min_w:
+        q, r = divmod(merged_min_w - sum(stu_w), len(stu_w))
+        stu_w = [w + q + (1 if i < r else 0) for i, w in enumerate(stu_w)]
+    merged_w = sum(stu_w)
+
+    # 1차 계산: 각 칸의 줄 나눔과 행 높이. 전체 이미지 크기를 알아야 그릴 수 있다.
+    blocks = []  # [(날짜, [(라벨텍스트, 라벨, 높이, 병합여부, [(폭, 줄들, 색)])])]
+    for dt in dates:
+        top = tops[dt]
+        rows = []
+        for k, lab in enumerate(LABELS):
+            if lab in ('수업내용', '다음과제'):
+                v = ws.cell(top + ac.ROW_OFFSET[lab], ac.STUDENT_FIRST_COL).value if top else None
+                lines = _wrap(md, v, fnt, merged_w - pad * 2) if v not in (None, '') else []
+                cells, n, merged = [(merged_w, lines, BLACK)], len(lines), True
+            else:
+                cells, n, merged = [], 1, False
+                for (name, col), w in zip(roster, stu_w):
+                    c = ws.cell(top + ac.ROW_OFFSET[lab], col) if top else None
+                    v = c.value if c else None
+                    lines = _wrap(md, v, fnt, w - pad * 2) if v not in (None, '') else []
+                    n = max(n, len(lines))
+                    cells.append((w, lines, _cell_color(c) if c else BLACK))
+            rows.append((block_label(top, k), lab, max(row_h, n * line_h + pad), merged, cells))
+        blocks.append((dt, rows))
+
+    W = date_w + label_w + merged_w
+    H = row_h + sum(sum(r[2] for r in rows) for _, rows in blocks)
     img = Image.new("RGB", (W + 1, H + 1), WHITE)
     d = ImageDraw.Draw(img)
 
+    def box(x, y, w, h, bg, width=None):
+        d.rectangle([x, y, x + w, y + h], fill=bg, outline=GRID,
+                    width=width or max(1, scale // 2))
+
+    def put(x, y, w, h, lines, color=BLACK, align="center"):
+        """세로 가운데 정렬로 여러 줄을 그린다."""
+        ty = y + (h - len(lines) * line_h) // 2
+        for i, ln in enumerate(lines):
+            tx = x + (w - d.textlength(ln, font=fnt)) // 2 if align == "center" else x + pad
+            d.text((tx, ty + i * line_h), ln, font=fnt, fill=color)
+
     def cell(x, y, w, h, text, bg=WHITE, color=BLACK, align="center"):
-        d.rectangle([x, y, x + w, y + h], fill=bg, outline=GRID, width=max(1, scale // 2))
-        if text is None or str(text) == "":
-            return
-        s = str(text)
-        bbox = d.textbbox((0, 0), s, font=fnt)
-        th = bbox[3] - bbox[1]
-        ty = y + (h - th) // 2 - bbox[1]
-        if align == "center":
-            tx = x + (w - d.textlength(s, font=fnt)) // 2
-        else:
-            tx = x + pad
-        d.text((tx, ty), s, font=fnt, fill=color)
+        box(x, y, w, h, bg)
+        if text not in (None, ''):
+            put(x, y, w, h, _wrap(md, text, fnt, w - pad * 2), color, align)
 
     # 헤더
     x = 0
@@ -208,30 +285,21 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
 
     # 날짜 블록들
     y = row_h
-    for di, dt in enumerate(dates):
-        top = ac.find_date_block(ws, dt)
-        # 날짜 셀 (5행 병합)
-        d.rectangle([0, y, date_w, y + row_h * 5], fill=WHITE, outline=GRID, width=scale)
-        db = d.textbbox((0, 0), dt, font=fnt)
-        d.text((date_w // 2 - d.textlength(dt, font=fnt) // 2,
-                y + (row_h * 5) // 2 - (db[3] - db[1]) // 2 - db[1]), dt, font=fnt, fill=BLACK)
-        for k, lab in enumerate(LABELS):
-            ry = y + k * row_h
+    for dt, rows in blocks:
+        bh = sum(r[2] for r in rows)
+        box(0, y, date_w, bh, WHITE, width=scale)  # 날짜 셀 (5행 병합)
+        put(0, y, date_w, bh, _wrap(md, dt, fnt, date_w - pad * 2))
+        ry = y
+        for lab_text, lab, h, merged, cells in rows:
             rowbg = CREAM if lab == '출석' else WHITE
-            cell(date_w, ry, label_w, row_h, block_label(top, k), rowbg)
-            if lab in ('수업내용', '다음과제'):
-                # 학생 영역 전체에 하나로
-                val = ws.cell(top + ac.ROW_OFFSET[lab], ac.STUDENT_FIRST_COL).value if top else None
-                x0 = date_w + label_w
-                cell(x0, ry, sum(stu_w), row_h, val, WHITE)
-            else:
-                x = date_w + label_w
-                for (name, col), w in zip(roster, stu_w):
-                    v = ws.cell(top + ac.ROW_OFFSET[lab], col).value if top else None
-                    col_c = _cell_color(ws.cell(top + ac.ROW_OFFSET[lab], col)) if top else BLACK
-                    cell(x, ry, w, row_h, v, rowbg, color=col_c)
-                    x += w
-        y += row_h * 5
+            cell(date_w, ry, label_w, h, lab_text, rowbg)
+            x = date_w + label_w
+            for w, lines, c in cells:
+                box(x, ry, w, h, WHITE if merged else rowbg)
+                put(x, ry, w, h, lines, c)
+                x += w
+            ry += h
+        y += bh
     return img
 
 
