@@ -1542,68 +1542,80 @@ def _resolve_preview_date(text):
 
 
 def _find_student(text, wb):
-    """텍스트에 등장하는 학생 이름과 그 반을 찾는다. (name, sheet) 또는 (None, None)."""
+    """텍스트에 등장하는 학생 이름과 그 학생이 속한 모든 반. (name, [sheets]) 또는 (None, [])."""
+    hits = []
     for sheet in wb.sheetnames:
         for nm in ac.get_roster(wb[sheet]):
             if nm and nm in text:
-                return nm, sheet
-    return None, None
+                hits.append((nm, sheet))
+    if not hits:
+        return None, []
+    name = max((nm for nm, _ in hits), key=len)  # 가장 긴(정확한) 이름
+    sheets = [s for nm, s in hits if nm == name]
+    return name, sheets
 
 
-async def _preview_student(update, context, name, sheet, text):
-    """한 학생의 기간(월/주/날짜) 출결을 이미지로 보낸다."""
+async def _preview_student(update, context, name, sheets, text):
+    """한 학생의 기간(월/주/날짜) 출결을 이미지로 보낸다. 여러 반이면 반마다 한 장씩."""
     chat_id = update.effective_chat.id
     today = datetime.datetime.now(KST).date()
-    # 기간 결정: 주 > 단일날짜 > 월 > (기본)이번달
-    if any(k in text for k in ("이번주", "금주")):
-        mon, sun = rpt.week_bounds(today)
-    elif any(k in text for k in ("저번주", "지난주")):
-        mon, sun = rpt.week_bounds(today - datetime.timedelta(days=7))
-    else:
-        mon = sun = None
 
-    if mon is not None:
+    # 기간 결정 + 파일 로드
+    if any(k in text for k in ("이번주", "금주")):
+        mon, sun = rpt.week_bounds(today); mode = "week"
+    elif any(k in text for k in ("저번주", "지난주")):
+        mon, sun = rpt.week_bounds(today - datetime.timedelta(days=7)); mode = "week"
+    else:
+        mon = sun = None; mode = None
+
+    if mode == "week":
         wb, _, _ = load_wb_for_date(f"{mon.month}/{mon.day}")
-        if wb is None:
-            wb, _ = load_latest_wb()
-        dates = rpt.week_dates(wb[sheet], mon, sun, sun.year)
-        cap = f"📷 {name} · {mon.month}/{mon.day}~{sun.month}/{sun.day}"
+        period = f"{mon.month}/{mon.day}~{sun.month}/{sun.day}"
     else:
         d = _resolve_preview_date(text)
         if d is not None:
             ds = f"{d.month}/{d.day}"
-            wb, _, mo = load_wb_for_date(ds)
+            wb, _, mo = load_wb_for_date(ds); mode = "date"
             if wb is None:
                 await update.message.reply_text(f"{mo}월 출석부 파일이 없어요.")
                 return
-            dates = [ds] if ac.find_date_block(wb[sheet], ds) else []
-            cap = f"📷 {name} · {ds}"
+            period = ds
         else:
             mm = re.search(r'(\d{1,2})\s*월', text)
-            if '지난달' in text:
-                month = 12 if today.month == 1 else today.month - 1
-            elif mm:
-                month = int(mm.group(1))
-            else:
-                month = today.month
-            wb, _, _ = load_wb_for_date(f"{month}/1")
-            if wb is None:
-                wb, _ = load_latest_wb()
-            dates = ac.sheet_dates(wb).get(sheet, [])
-            cap = f"📷 {name} · {month}월"
+            month = (12 if today.month == 1 else today.month - 1) if '지난달' in text \
+                else (int(mm.group(1)) if mm else today.month)
+            wb, _, _ = load_wb_for_date(f"{month}/1"); mode = "month"
+            period = f"{month}월"
+    if wb is None:
+        wb, _ = load_latest_wb()
+    if wb is None:
+        await update.message.reply_text("출석부 파일이 없어요.")
+        return
 
-    if not dates:
-        await update.message.reply_text(f"{name}({sheet})의 해당 기간 수업일이 없어요.")
-        return
+    def dates_for(sheet):
+        if mode == "week":
+            return rpt.week_dates(wb[sheet], mon, sun, sun.year)
+        if mode == "date":
+            ds = period
+            return [ds] if ac.find_date_block(wb[sheet], ds) else []
+        return ac.sheet_dates(wb).get(sheet, [])
+
     await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
-    img = rpt.render_student_table(name, wb[sheet], dates)
-    if img is None:
-        await update.message.reply_text(f"{name} 학생을 명단에서 못 찾았어요.")
-        return
-    bio = io.BytesIO()
-    img.save(bio, "PNG")
-    bio.seek(0)
-    await update.message.reply_photo(photo=bio, caption=cap)
+    sent = 0
+    for sheet in sheets:
+        if sheet not in wb.sheetnames:
+            continue
+        dates = dates_for(sheet)
+        if not dates:
+            continue
+        img = rpt.render_student_table(name, wb[sheet], dates)
+        if img is None:
+            continue
+        bio = io.BytesIO(); img.save(bio, "PNG"); bio.seek(0)
+        await update.message.reply_photo(photo=bio, caption=f"📷 {name} · {sheet} · {period}")
+        sent += 1
+    if sent == 0:
+        await update.message.reply_text(f"{name} 학생의 해당 기간 수업일이 없어요.")
 
 
 async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1615,10 +1627,10 @@ async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if latest is None:
         await update.message.reply_text("아직 출석부 파일이 없어요.")
         return
-    # 학생 이름이 있으면 학생별 미리보기 우선
-    sname, ssheet = _find_student(text, latest)
+    # 학생 이름이 있으면 학생별 미리보기 우선 (여러 반이면 반마다)
+    sname, ssheets = _find_student(text, latest)
     if sname:
-        return await _preview_student(update, context, sname, ssheet, text)
+        return await _preview_student(update, context, sname, ssheets, text)
     cands = _match_preview_sheet(text, latest.sheetnames)
     if not cands:
         await update.message.reply_text(
