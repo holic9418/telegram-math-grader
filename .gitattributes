@@ -1,0 +1,8 @@
+# 저장소에는 항상 LF로 저장 — 맥/윈도우를 오가도 줄바꿈이 섞이지 않게.
+# 특히 Procfile·Dockerfile은 리눅스(Railway)에서 실행되므로 CRLF가 섞이면 배포가 깨진다.
+* text=auto eol=lf
+
+# 바이너리 — 줄바꿈 변환 금지
+*.xlsx binary
+*.png binary
+*.jpg binary
