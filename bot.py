@@ -594,6 +594,7 @@ GUIDE = f"""📋 <b>{SUBJ_NAME} 출석부 봇 사용법</b>
 • 수업이 끝나고 <b>15분 뒤까지 출석부 미기입시</b> 담당 쌤에게 알림을 보내드려요.
 • 알림 시각을 바꾸려면 <code>알림 초5 21:00</code> 처럼 보내주세요.
 • <b>일정</b> : 반별 수업 요일 보기·변경 (예: <code>일정 고1 화목토</code>)
+• <b>시간표</b> : 요일별 수업 시간표를 한눈에 보기
 • 매일 1시에 밀린 미입력 출석도 한 번 더 알려드려요.
 • <b>점검</b> : 출석부에 이상한 날짜(중복·다른 달)가 있는지 확인하고 정리해요.
   기록이 있는 블록은 알려만 드리고 손대지 않아요.
@@ -754,6 +755,36 @@ async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ {cls} — {'·'.join(WD[d] for d in day_idxs)}요일 {hhmm}에 출석 미입력 시 알려드릴게요."
     )
+
+
+async def cmd_timetable(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """반별 수업 요일·시각을 요일별 시간표로 보여준다."""
+    remember_chat(update.effective_chat.id)
+    scheds = load_schedules()
+    times = load_times()
+    closed = set(load_closed())
+    # 요일별로 (시각, 반) 모으기
+    byday = {i: [] for i in range(7)}
+    for cls, idxs in scheds.items():
+        if cls in closed:
+            continue
+        for i in idxs:
+            t = (times.get(cls) or {}).get(str(i), "")
+            byday[i].append((t, cls))
+    lines = [f"📅 <b>{SUBJ_NAME} 주간 시간표</b>"]
+    any_day = False
+    for i in range(7):
+        items = sorted(byday[i], key=lambda x: (x[0] or "99:99", x[1]))
+        if not items:
+            continue
+        any_day = True
+        parts = [f"{cls} {t}" if t else cls for t, cls in items]
+        lines.append(f"<b>[{WD[i]}]</b> " + "  ·  ".join(parts))
+    if not any_day:
+        lines.append("아직 등록된 시간표가 없어요. '일정'(요일)·'알림'(시각)으로 설정하면 여기 모여요.")
+    else:
+        lines.append("\n(시각은 출석 확인 알림 시각이에요. 바꾸려면 '알림 반 요일 시각')")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1496,6 +1527,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 그 외 입력은 아래에서 새로 처리 (기존 대기는 덮어씀)
 
     # 한글 키워드를 명령처럼 처리 (슬래시 있어도/없어도)
+    if low in ("시간표", "수업시간표", "주간시간표"):
+        return await cmd_timetable(update, context)
     if kw in ("일정", "스케줄"):
         context.args = parts[1:]
         return await cmd_schedule(update, context)
