@@ -2021,18 +2021,45 @@ def _resolve_preview_date(text):
     return None
 
 
-def _find_student(text, wb):
-    """텍스트에 등장하는 학생 이름과 그 학생이 속한 모든 반. (name, [sheets]) 또는 (None, [])."""
+def _name_givens(nm):
+    """성 뗀 이름 후보. '원서진'→{'서진'}, '남궁민수'→{'궁민수','민수'}."""
+    g = set()
+    if len(nm) >= 3:
+        g.add(nm[1:])
+    if len(nm) >= 4:
+        g.add(nm[2:])
+    return g
+
+
+def _student_hits(text, wb, include_given):
+    """text가 가리키는 학생 (nm, sheet) 목록.
+    풀네임/풀네임+'이'를 먼저 보고, include_given이면 성 뗀 이름(+'이')도 본다."""
     hits = []
     for sheet in wb.sheetnames:
         for nm in ac.get_roster(wb[sheet]):
-            if nm and nm in text:
+            if not nm:
+                continue
+            ok = (nm in text) or ((nm + '이') in text)
+            if not ok and include_given:
+                ok = any(g in text or (g + '이') in text for g in _name_givens(nm))
+            if ok:
                 hits.append((nm, sheet))
+    return hits
+
+
+def _find_student(text, wb):
+    """텍스트의 학생 이름과 그 학생이 속한 모든 반. (name, [sheets], ambiguous).
+    성 떼거나 '~이'로 불러도 인식. 동명이인이면 (None, [], [이름들])."""
+    hits = _student_hits(text, wb, include_given=False)   # 풀네임 우선
     if not hits:
-        return None, []
-    name = max((nm for nm, _ in hits), key=len)  # 가장 긴(정확한) 이름
-    sheets = [s for nm, s in hits if nm == name]
-    return name, sheets
+        hits = _student_hits(text, wb, include_given=True)  # 성 뗀 이름
+    names = {nm for nm, _ in hits}
+    if not names:
+        return None, [], []
+    if len(names) > 1:                                     # 동명이인 → 애매
+        return None, [], sorted(names)
+    name = next(iter(names))
+    return name, [s for nm, s in hits if nm == name], []
 
 
 async def _preview_student(update, context, name, sheets, text):
@@ -2107,7 +2134,10 @@ async def cmd_homework(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if latest is None:
         await update.message.reply_text("아직 출석부 파일이 없어요.")
         return
-    name, sheets = _find_student(text, latest)
+    name, sheets, amb = _find_student(text, latest)
+    if amb:
+        await update.message.reply_text("여러 명이에요: " + ", ".join(amb) + " — 성까지 붙여 불러주세요.")
+        return
     if not name:
         await update.message.reply_text("누구 과제인지 이름을 알려주세요. 예) 7월 15일 원서진 과제")
         return
@@ -2142,7 +2172,10 @@ async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("아직 출석부 파일이 없어요.")
         return
     # 학생 이름이 있으면 학생별 미리보기 우선 (여러 반이면 반마다)
-    sname, ssheets = _find_student(text, latest)
+    sname, ssheets, samb = _find_student(text, latest)
+    if samb:
+        await update.message.reply_text("여러 명이에요: " + ", ".join(samb) + " — 성까지 붙여 불러주세요.")
+        return
     if sname:
         return await _preview_student(update, context, sname, ssheets, text)
     cands = _match_preview_sheet(text, latest.sheetnames)
