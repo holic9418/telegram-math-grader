@@ -1750,8 +1750,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_reset_config(update, context)
     if low in ("주간보고서", "보고서", "주간출결"):
         return await cmd_report(update, context)
-    # '7월 15일 원서진 과제' — 끝이 과제/숙제이고 날짜가 있으면 과제 조회
-    if re.search(r"(?:과제|숙제)\s*$", low) and (
+    # '원서진 7월 15일 과제' — 어순 무관하게 과제 조회 ('과제'/'숙제' 단독 단어 + 날짜)
+    # 단, '다음과제 51쪽' 같은 출석 입력과 구분: 짧고 상태어(출석/결석/O/X/점/쪽 등)가 없을 때만
+    _hw_word = any(re.fullmatch(r"(?:과제|숙제)[?？!요]*", p) for p in parts)
+    _looks_query = len(parts) <= 5 and not re.search(
+        r"결석|지각|조퇴|출석|수업|무단|미지참|미수령|다음과제|과제수행|\d+쪽|\d+점|[OoXx]", low)
+    if _hw_word and _looks_query and (
         _resolve_preview_date(low) is not None
         or any(k in low for k in ("이번주", "저번주", "지난주", "이번달"))
     ):
