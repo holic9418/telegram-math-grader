@@ -2012,6 +2012,17 @@ def _resolve_preview_date(text):
         return today - datetime.timedelta(days=1)
     if '내일' in text:
         return today + datetime.timedelta(days=1)
+    # '이번주 월요일' / '저번주 수요일' / '월요일' 등 (주 + 요일)
+    wm = re.search(r'([월화수목금토일])\s*요일', text)
+    if wm:
+        wi = WD.index(wm.group(1))
+        base = today
+        if any(k in text for k in ('저번주', '지난주', '전주')):
+            base = today - datetime.timedelta(days=7)
+        elif '다음주' in text or '담주' in text:
+            base = today + datetime.timedelta(days=7)
+        monday = base - datetime.timedelta(days=base.weekday())
+        return monday + datetime.timedelta(days=wi)
     m = re.search(r'(\d{1,2})\s*월\s*(\d{1,2})', text) or re.search(r'(\d{1,2})[/.](\d{1,2})', text)
     if m:
         try:
@@ -2067,10 +2078,11 @@ async def _preview_student(update, context, name, sheets, text):
     chat_id = update.effective_chat.id
     today = datetime.datetime.now(KST).date()
 
-    # 기간 결정 + 파일 로드
-    if any(k in text for k in ("이번주", "금주")):
+    # 기간 결정 + 파일 로드 ('이번주 월요일'처럼 요일이 콕 집히면 그날 하루)
+    _has_weekday = re.search(r'[월화수목금토일]\s*요일', text)
+    if not _has_weekday and any(k in text for k in ("이번주", "금주")):
         mon, sun = rpt.week_bounds(today); mode = "week"
-    elif any(k in text for k in ("저번주", "지난주")):
+    elif not _has_weekday and any(k in text for k in ("저번주", "지난주")):
         mon, sun = rpt.week_bounds(today - datetime.timedelta(days=7)); mode = "week"
     else:
         mon = sun = None; mode = None
@@ -2190,11 +2202,12 @@ async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     sheet = cands[0]
 
-    # 이번주/저번주면 그 주 전체, 아니면 특정 날짜
+    # 이번주/저번주면 그 주 전체, 아니면 특정 날짜 (요일이 콕 집히면 그날 하루)
     base = None
-    if any(k in text for k in ("이번주", "금주")):
+    _has_weekday = re.search(r'[월화수목금토일]\s*요일', text)
+    if not _has_weekday and any(k in text for k in ("이번주", "금주")):
         base = datetime.datetime.now(KST).date()
-    elif any(k in text for k in ("저번주", "지난주")):
+    elif not _has_weekday and any(k in text for k in ("저번주", "지난주")):
         base = datetime.datetime.now(KST).date() - datetime.timedelta(days=7)
 
     if base is not None:
