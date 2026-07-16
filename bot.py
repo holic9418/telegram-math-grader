@@ -135,6 +135,27 @@ def save_times(t):
         json.dump(t, f, ensure_ascii=False, indent=2)
 
 
+def hours_path():
+    return os.path.join(DATA_DIR, "class_hours.json")
+
+
+def load_hours():
+    """{반이름: {요일idx(str): 'HH:MM~HH:MM'}} — 시간표에 띄우는 실제 수업 시간.
+    파일이 없으면 과목 기본값(subjects.py)을 심고 반환한다."""
+    p = hours_path()
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    default = {k: dict(v) for k, v in SUBJ.get("hours", {}).items()}
+    save_hours(default)
+    return default
+
+
+def save_hours(h):
+    with open(hours_path(), "w", encoding="utf-8") as f:
+        json.dump(h, f, ensure_ascii=False, indent=2)
+
+
 def teachers_path():
     return os.path.join(DATA_DIR, "teachers.json")
 
@@ -299,6 +320,21 @@ def class_input_blocked(sheet, date_str):
         return False
     _, csun = rpt.week_bounds(datetime.date(y, cm, cd))
     return datetime.date(y, dm, dd) > csun
+
+
+def class_off_timetable(sheet, closed):
+    """종강한 반을 시간표에서 뺄 때인지. 입력 차단과 같은 기준으로,
+    종강 주까지는 남기고 다음 주부터 뺀다. closed = load_closed() 결과."""
+    day = closed.get(sheet)
+    if not day:
+        return False
+    today = datetime.datetime.now(KST).date()
+    try:
+        cm, cd = map(int, str(day).split("/"))
+    except ValueError:
+        return True
+    _, csun = rpt.week_bounds(datetime.date(today.year, cm, cd))
+    return today > csun
 
 
 def apply_enroll_events(sheet, date_str, life):
@@ -618,6 +654,7 @@ GUIDE = f"""📋 <b>{SUBJ_NAME} 출석부 봇 사용법</b>
 • <b>휴강</b>: <code>7/20 휴강</code> (사유는 뒤에 <code>7/20 휴강 폭우</code>) · 취소 <code>7/20 휴강취소</code>
    → 그날 수업 있는 반 전부 빨간 '휴강'으로 (알림도 안 가요)
 • <b>개강 / 종강</b>: <code>고3B 신규개강</code> / <code>고3B 종강</code> (반 자체를 만들거나 종료)
+   → 개강 때 받은 수업 시간이 <b>시간표에 자동 추가</b>, 종강하면 그 주까지만 뜨고 <b>다음 주부터 빠져요</b>
    ※ 학생 한 명은 <b>신규등록</b> · <b>퇴원</b> 으로
 • <b>점검</b>: 이상한 날짜(중복·다른 달) 확인·정리
 
@@ -688,6 +725,38 @@ def parse_time_token(text):
     if not (0 <= hh <= 23 and 0 <= mm <= 59):
         return None
     return f"{hh:02d}:{mm:02d}"
+
+
+def parse_hours_token(text):
+    """'15:00~16:00', '오후 3시~4시', '4시부터 6시' → 'HH:MM~HH:MM'. 실패 시 None."""
+    parts = re.split(r"\s*(?:~|—|–|-|부터|에서)\s*", str(text).strip(), maxsplit=1)
+    if len(parts) != 2:
+        return None
+    head, tail = parts[0], parts[1]
+    # '오후 3시~4시' — 앞에만 붙은 오전/오후를 끝 시각에도 적용한다.
+    mark = re.search(r"(오전|오후|저녁|밤)", head)
+    if mark and not re.search(r"(오전|오후|저녁|밤)", tail):
+        tail = f"{mark.group(1)} {tail}"
+    start, end = parse_time_token(head), parse_time_token(tail)
+    if not start or not end:
+        return None
+    if end <= start:  # '11시~1시' 처럼 끝이 이르면 오후로 본다
+        eh, em = map(int, end.split(":"))
+        if eh + 12 <= 23:
+            end = f"{eh + 12:02d}:{em:02d}"
+    if end <= start:
+        return None
+    return f"{start}~{end}"
+
+
+def hours_end_plus(hr, minutes=15):
+    """'15:00~16:00' → 수업 종료 +minutes 의 'HH:MM'. 실패 시 None."""
+    try:
+        eh, em = map(int, hr.split("~")[1].split(":"))
+    except (ValueError, IndexError):
+        return None
+    t = (eh * 60 + em + minutes) % (24 * 60)
+    return f"{t // 60:02d}:{t % 60:02d}"
 
 
 async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -769,8 +838,9 @@ async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def _timetable_byday(classes, active, hours, only_days=None):
-    """요일별 시간표 줄 목록. only_days(요일idx 집합)가 있으면 그 요일만."""
+def _timetable_byday(classes, active, hours, only_days=None, ending=()):
+    """요일별 시간표 줄 목록. only_days(요일idx 집합)가 있으면 그 요일만.
+    ending 에 든 반은 이번 주가 마지막이라 '(이번 주 종강)'을 붙인다."""
     byday = {i: [] for i in range(7)}
     for cls in classes:
         for i in active.get(cls, []):
@@ -783,7 +853,12 @@ def _timetable_byday(classes, active, hours, only_days=None):
         items = sorted(byday[i], key=lambda x: (x[0], x[1]))
         if not items:
             continue
-        parts = [f"{cls} {hr}" if hr else cls for _, cls, hr in items]
+        parts = []
+        for _, cls, hr in items:
+            label = f"{cls} {hr}" if hr else f"{cls} (수업 시간 미설정)"
+            if cls in ending:
+                label += " ⏹ 이번 주 종강"
+            parts.append(label)
         lines.append(f"<b>[{WD[i]}]</b>\n  " + "\n  ".join(parts))
     return lines
 
@@ -793,9 +868,10 @@ async def cmd_timetable(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     remember_chat(chat_id)
     scheds = load_schedules()
-    hours = SUBJ.get("hours", {})
-    closed = set(load_closed())
-    active = {c: idxs for c, idxs in scheds.items() if c not in closed}
+    hours = load_hours()
+    closed = load_closed()
+    active = {c: idxs for c, idxs in scheds.items() if not class_off_timetable(c, closed)}
+    ending = {c for c in active if c in closed}   # 종강했지만 이번 주까지는 수업
     arg = " ".join(context.args).strip() if context.args else ""
 
     # 1) 담당(내 반)
@@ -805,7 +881,7 @@ async def cmd_timetable(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not mine:
             await update.message.reply_text("담당으로 지정한 반이 없어요. '담당 초5A' 처럼 먼저 지정하세요.")
             return
-        lines = [f"📅 <b>{SUBJ_NAME} · 내 담당 시간표</b>"] + _timetable_byday(mine, active, hours)
+        lines = [f"📅 <b>{SUBJ_NAME} · 내 담당 시간표</b>"] + _timetable_byday(mine, active, hours, ending=ending)
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
         return
 
@@ -813,7 +889,7 @@ async def cmd_timetable(update: Update, context: ContextTypes.DEFAULT_TYPE):
     days = parse_weekdays(arg) if arg else []
     if arg and days and all(ch in "월화수목금토일요일 " for ch in arg):
         lines = [f"📅 <b>{SUBJ_NAME} · {'·'.join(WD[i] for i in days)} 시간표</b>"]
-        lines += _timetable_byday(list(active), active, hours, only_days=set(days))
+        lines += _timetable_byday(list(active), active, hours, only_days=set(days), ending=ending)
         if len(lines) == 1:
             lines.append("그 요일에 수업이 없어요.")
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
@@ -824,7 +900,10 @@ async def cmd_timetable(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cls = arg if arg in active else next((c for c in active if c.replace(" ", "") == arg.replace(" ", "")), None)
         if cls:
             parts = [f"{WD[i]} {(hours.get(cls) or {}).get(str(i), '')}".strip() for i in sorted(active[cls])]
-            await update.message.reply_text(f"📅 <b>{cls}</b> 수업 시간표\n• " + "\n• ".join(parts), parse_mode="HTML")
+            note = "\n⏹ 종강한 반이라 이번 주까지만 수업해요." if cls in ending else ""
+            await update.message.reply_text(
+                f"📅 <b>{cls}</b> 수업 시간표\n• " + "\n• ".join(parts) + note, parse_mode="HTML"
+            )
             return
         await update.message.reply_text(
             f"'{arg}'를 못 알아들었어요. 예) 시간표 / 시간표 월 / 시간표 초5A / 시간표 담당"
@@ -832,7 +911,7 @@ async def cmd_timetable(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 4) 전체
-    lines = [f"📅 <b>{SUBJ_NAME} 주간 수업 시간표</b>"] + _timetable_byday(list(active), active, hours)
+    lines = [f"📅 <b>{SUBJ_NAME} 주간 수업 시간표</b>"] + _timetable_byday(list(active), active, hours, ending=ending)
     if len(lines) == 1:
         lines.append("아직 등록된 반이 없어요. '일정'으로 요일을 설정하면 여기 모여요.")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
@@ -1183,15 +1262,37 @@ async def handle_opening_step(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("요일을 못 알아들었어요. 예) 월수금")
             return
         st["weekdays"] = wds
-        st["step"] = "time"
+        st["step"] = "hours"
         await update.message.reply_text(
             f"요일: {'·'.join(WD[i] for i in wds)}\n\n"
-            "2️⃣ 출석 미입력 알림을 언제 보낼까요? 예) <code>저녁 9시</code>  (필요 없으면 '없음')",
+            "2️⃣ 수업 시간을 알려주세요. 시간표에 이대로 올라가요.\n"
+            "예) <code>15:00~16:00</code>  (나중에 정하려면 '없음')",
+            parse_mode="HTML",
+        )
+    elif step == "hours":
+        if text.strip() in ("없음", "없어", "나중에", "스킵", "건너뛰기", "skip"):
+            st["hours"] = None
+        else:
+            hr = parse_hours_token(text)
+            if not hr:
+                await update.message.reply_text(
+                    "수업 시간을 못 알아들었어요. 예) 15:00~16:00 · 오후 3시~4시  (또는 '없음')"
+                )
+                return
+            st["hours"] = hr
+        st["step"] = "time"
+        suggest = hours_end_plus(st["hours"]) if st["hours"] else None
+        tip = f"\n그냥 <b>확인</b>만 보내면 수업 종료 +15분({suggest})으로 할게요." if suggest else ""
+        await update.message.reply_text(
+            f"3️⃣ 출석 미입력 알림을 언제 보낼까요? 예) <code>저녁 9시</code>  (필요 없으면 '없음'){tip}",
             parse_mode="HTML",
         )
     elif step == "time":
+        suggest = hours_end_plus(st["hours"]) if st.get("hours") else None
         if text.strip() in ("없음", "없어", "스킵", "건너뛰기", "skip"):
             st["time"] = None
+        elif suggest and text.strip().startswith("확인"):
+            st["time"] = suggest
         else:
             hhmm = parse_time_token(text)
             if not hhmm:
@@ -1200,7 +1301,7 @@ async def handle_opening_step(update: Update, context: ContextTypes.DEFAULT_TYPE
             st["time"] = hhmm
         st["step"] = "students"
         await update.message.reply_text(
-            "3️⃣ 학생 명단을 알려주세요. 예) <code>김철수, 이영희, 박민수</code>  (없으면 '없음')",
+            "4️⃣ 학생 명단을 알려주세요. 예) <code>김철수, 이영희, 박민수</code>  (없으면 '없음')",
             parse_mode="HTML",
         )
     elif step == "students":
@@ -1210,11 +1311,12 @@ async def handle_opening_step(update: Update, context: ContextTypes.DEFAULT_TYPE
             st["students"] = [n.strip() for n in re.split(r"[,\n]+", text) if n.strip()]
         st["step"] = "confirm"
         wd = "·".join(WD[i] for i in st["weekdays"])
+        hr = st.get("hours") or "없음 (나중에)"
         tm = st["time"] or "없음"
         stu = ", ".join(st["students"]) if st["students"] else "(없음 — 나중에 신규등록)"
         await update.message.reply_text(
             f"이렇게 개강할게요:\n"
-            f"• 반: <b>{st['sheet']}</b>\n• 요일: {wd}\n• 알림: {tm}\n• 학생: {stu}\n\n"
+            f"• 반: <b>{st['sheet']}</b>\n• 요일: {wd}\n• 수업 시간: {hr}\n• 알림: {tm}\n• 학생: {stu}\n\n"
             "맞으면 <b>확인</b>, 아니면 <b>취소</b>",
             parse_mode="HTML",
         )
@@ -1237,6 +1339,8 @@ async def handle_opening_step(update: Update, context: ContextTypes.DEFAULT_TYPE
         sch = load_schedules(); sch[st["sheet"]] = st["weekdays"]; save_schedules(sch)
         if st["time"]:
             tms = load_times(); tms[st["sheet"]] = {str(d): st["time"] for d in st["weekdays"]}; save_times(tms)
+        if st.get("hours"):
+            hrs = load_hours(); hrs[st["sheet"]] = {str(d): st["hours"] for d in st["weekdays"]}; save_hours(hrs)
         cl = load_closed()
         if cl.pop(st["sheet"], None) is not None:
             save_closed(cl)
