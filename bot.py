@@ -827,6 +827,23 @@ async def cmd_timetable(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+async def cmd_add_weekday(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """이번 달 출석부 파일의 날짜 셀에 요일을 붙인다(데이터 유지). 관리자 전용."""
+    if not await require_admin(update):
+        return
+    wb, path = load_current_wb()
+    if wb is None:
+        await update.message.reply_text("이번 달 출석부 파일이 없어요.")
+        return
+    y, _ = current_ym()
+    n = ac.add_weekday_labels(wb, y)
+    wb.save(path)
+    await update.message.reply_text(
+        f"✅ 날짜 {n}개에 요일을 붙였어요 (예: 7/15 → 7/15(수)).\n"
+        "받아보려면 '출석부' 보내세요."
+    )
+
+
 async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """반별 담당 지정. 담당으로 지정된 반의 출석 알림은 그 선생님에게만 간다."""
     chat_id = update.effective_chat.id
@@ -1594,6 +1611,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_revoke(update, context)
     if low in ("멤버", "명단", "멤버목록", "대기", "대기목록"):
         return await cmd_members(update, context)
+    if low in ("요일추가", "날짜요일", "요일넣기"):
+        return await cmd_add_weekday(update, context)
     if low in ("설정초기화", "기본설정복원", "반목록갱신"):
         return await cmd_reset_config(update, context)
     if low in ("주간보고서", "보고서", "주간출결"):

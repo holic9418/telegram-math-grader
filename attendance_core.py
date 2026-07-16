@@ -413,6 +413,26 @@ def next_year_month(year, month):
     return (year + 1, 1) if month == 12 else (year, month + 1)
 
 
+def add_weekday_labels(wb, year=None):
+    """모든 시트의 날짜 셀에 요일을 붙인다 ('7/15' → '7/15(화)').
+    이미 요일이 있으면 그대로 둔다. 데이터·서식은 건드리지 않음. 반환: 바꾼 개수."""
+    year = year or datetime.date.today().year
+    n = 0
+    for name in wb.sheetnames:
+        ws = wb[name]
+        start = _find_start_row(ws)
+        if not start:
+            continue
+        for r in range(start, ws.max_row + 1):
+            v = ws.cell(r, 1).value
+            k = date_key(v)
+            if not k or '(' in str(v):     # 날짜 아님/이미 요일표기 → 건너뜀
+                continue
+            ws.cell(r, 1).value = date_label(k, year)
+            n += 1
+    return n
+
+
 def _strip_diagonal(cell):
     """셀의 대각선(사선) 테두리만 제거하고 나머지 테두리는 유지."""
     b = cell.border
