@@ -1654,13 +1654,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await undo_holiday(update, context, day)
         return await start_holiday(update, context, day, reason)
 
-    # 신규개강 / 종강 트리거 (예: '고3B 신규개강', '고3B 종강')
-    mo = re.match(r"^(.+?)\s*(?:신규개강|개강)$", low)
+    # 신규개강 / 종강 트리거 (어순 무관: '고3B 신규개강' = '신규개강 고3B')
+    mo = re.match(r"^(?:(?:신규개강|개강)\s+(.+)|(.+?)\s*(?:신규개강|개강))$", low)
     if mo:
-        return await start_opening(update, context, mo.group(1).strip())
-    mc = re.match(r"^(.+?)\s*종강$", low)
+        return await start_opening(update, context, (mo.group(1) or mo.group(2)).strip())
+    mc = re.match(r"^(?:종강\s+(.+)|(.+?)\s*종강)$", low)
     if mc:
-        return await start_closing(update, context, mc.group(1).strip())
+        return await start_closing(update, context, (mc.group(1) or mc.group(2)).strip())
 
     # 확인/취소 대기 처리 (확인 뒤에 추가 정보가 붙어도 인식하고 병합)
     if chat_id in pending:
