@@ -342,7 +342,7 @@ def apply_enroll_events(sheet, date_str, life):
     e = load_enroll()
     cls = e.setdefault(sheet, {})
     for st, event in life.items():
-        info = cls.setdefault(st, {"from": None, "to": None})
+        info = cls.setdefault(ac.nfc(st), {"from": None, "to": None})
         if event in ac.LIFECYCLE_ADD:
             info["from"] = date_str
             info["to"] = None
@@ -559,7 +559,7 @@ def build_preview(wb, parsed):
         parts = []
         for name, val in att.items():
             parts.append(f"{name} {val}")
-            if name not in roster:
+            if ac.nfc(name) not in roster:
                 warnings.append(name)
         lines.append("• 출석: " + ", ".join(parts))
     if parsed.get("수업내용"):
@@ -569,7 +569,7 @@ def build_preview(wb, parsed):
         shown = {n: v for n, v in hw.items() if n not in absent}
         if shown:
             lines.append("• 과제수행: " + ", ".join(f"{n} {v}" for n, v in shown.items()))
-        warnings += [n for n in hw if n not in roster]
+        warnings += [n for n in hw if ac.nfc(n) not in roster]
     if parsed.get("다음과제"):
         lines.append(f"• 다음과제: {parsed['다음과제']}")
     bg_label = (parsed.get("비고라벨") or "비고").strip()
@@ -580,7 +580,7 @@ def build_preview(wb, parsed):
         shown_bg = {n: v for n, v in bg.items() if n not in absent}
         if shown_bg:
             lines.append(f"• {bg_label}: " + ", ".join(f"{n}: {v}" for n, v in shown_bg.items()))
-        warnings += [n for n in bg if n not in roster]
+        warnings += [n for n in bg if ac.nfc(n) not in roster]
     if absent:
         lines.append(f"• 결석: {', '.join(sorted(absent))} → 과제수행·비고는 비워둡니다.")
 

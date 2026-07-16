@@ -5,7 +5,7 @@
  - 반별 요일패턴으로 새 달 출석부 생성 (학생/서식 유지, 공휴일 병합+빨강)
  - 시트 → HTML 미리보기 렌더
 """
-import io, re, zipfile, datetime, calendar
+import io, re, zipfile, datetime, calendar, unicodedata
 from copy import copy
 import openpyxl
 from openpyxl.styles import Font, Alignment, Border
@@ -13,6 +13,12 @@ from openpyxl.cell.cell import MergedCell
 import holidays as _holidays
 
 WEEKDAY_KR = ['월', '화', '수', '목', '금', '토', '일']
+
+
+def nfc(s):
+    """한글 이름을 NFC로 통일한다. 맥(NFD)·윈도우(NFC)에서 입력된 같은 이름이
+    눈엔 똑같아도 코드포인트가 달라 매칭에 실패하는 걸 막는다."""
+    return unicodedata.normalize('NFC', s) if isinstance(s, str) else s
 KR_WD_TO_IDX = {k: i for i, k in enumerate(WEEKDAY_KR)}
 
 # 국경일이지만 실제 휴무가 아닌 날 (수업 정상 진행) → 공휴일에서 제외
@@ -267,7 +273,7 @@ def get_roster(ws):
     for c in range(STUDENT_FIRST_COL, last_col + 1):
         v = ws.cell(header_row, c).value
         if v and str(v).strip() and str(v).strip() != '학생이름':
-            roster[str(v).strip()] = c
+            roster[nfc(str(v).strip())] = c
     return roster
 
 
@@ -620,6 +626,8 @@ def student_active(enroll, student, date_str):
     """enroll: {student: {'from':'M/D'|None,'to':'M/D'|None}}.
     해당 날짜에 이 학생이 재적(입력 대상)인지."""
     info = (enroll or {}).get(student)
+    if info is None:   # 저장은 NFC지만 파일에 NFD로 남은 옛 키도 매칭
+        info = {nfc(k): v for k, v in (enroll or {}).items()}.get(nfc(student))
     if not info:
         return True
     dk = _date_key(date_str)
@@ -649,7 +657,7 @@ def add_student(ws, name):
         ws.column_dimensions[dl].width = ws.column_dimensions[sl].width
     for r in range(start, ws.max_row + 1):      # 기존 블록 데이터는 비움
         ws.cell(r, new_col).value = None
-    ws.cell(start - 1, new_col).value = name    # 헤더에 이름
+    ws.cell(start - 1, new_col).value = nfc(name)    # 헤더에 이름(NFC로 저장)
     return new_col
 
 
@@ -686,9 +694,9 @@ def set_roster(wb, sheet, target_names):
     if len(cur) > need:                          # 남음 → 뒤쪽 열 제거
         rebuild_without_students(wb, sheet, [nm for nm, _ in cur[need:]])
         ws = wb[sheet]
-    # 헤더 이름을 target 으로 (열은 3부터 연속)
+    # 헤더 이름을 target 으로 (열은 3부터 연속). NFC로 저장해 매칭 어긋남 방지.
     for i, nm in enumerate(target_names):
-        ws.cell(header, STUDENT_FIRST_COL + i).value = nm
+        ws.cell(header, STUDENT_FIRST_COL + i).value = nfc(nm)
 
 
 def rebuild_without_students(wb, sheet, drop_names):
@@ -757,8 +765,12 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
     roster = get_roster(ws)
     written, warnings = [], []
 
+    def _norm_keys(block):
+        """이름을 키로 쓰는 블록의 키를 NFC로 통일(맥 NFD 입력 대비). 문자열이면 그대로."""
+        return {nfc(k): v for k, v in block.items()} if isinstance(block, dict) else block
+
     # 학적 변동 처리: 명단 추가(신규·전입) + 출석칸에 표시
-    life = data.get('학적') or {}
+    life = _norm_keys(data.get('학적') or {})
     for st, event in life.items():
         if event in LIFECYCLE_ADD and st not in roster:
             roster[st] = add_student(ws, st)
@@ -780,7 +792,7 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
 
     # 결석(지각·조퇴 제외) 학생: 과제수행·비고 칸을 비운다
     absent = {
-        st for st, val in (data.get('출석') or {}).items()
+        st for st, val in _norm_keys(data.get('출석') or {}).items()
         if st in roster and st not in life and is_absent(val)
     }
     for st in absent:
@@ -808,7 +820,7 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
         written.append(f"{label} · {student} = {value}")
 
     for label in ('출석', '과제수행', '비고'):
-        block = data.get(label)
+        block = _norm_keys(data.get(label))
         if isinstance(block, dict):
             for st, val in block.items():
                 if st in life:
