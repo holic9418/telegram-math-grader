@@ -1233,11 +1233,27 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── 신규개강 / 종강 (반 단위) ──────────────────────────────────
 async def start_opening(update: Update, context: ContextTypes.DEFAULT_TYPE, sheet):
     chat_id = update.effective_chat.id
-    wb, _ = load_current_wb()
+    wb, path = load_current_wb()
     if wb is None:
         await update.message.reply_text("이번 달 출석부 파일이 없어요. 먼저 파일을 보내거나 /생성 해주세요.")
         return
     if sheet in wb.sheetnames:
+        # 이름을 띄어쓰기로 넣어 한 칸에 뭉쳐버린 경우 → 각 학생 열로 쪼개 복구
+        roster = list(ac.get_roster(wb[sheet]).keys())
+        crammed = [n for n in roster if any(c.isspace() for c in n)]
+        if crammed:
+            names = []
+            for n in roster:
+                for one in n.split():
+                    if one not in names:
+                        names.append(one)
+            ac.set_roster(wb, sheet, names)
+            wb.save(path)
+            await update.message.reply_text(
+                f"🔧 '{sheet}' 명단이 한 칸에 뭉쳐 있어 {len(names)}명으로 나눠 고쳤어요.\n"
+                f"• {', '.join(names)}\n이제 출석 입력이 될 거예요.",
+            )
+            return
         await update.message.reply_text(f"'{sheet}' 반은 이미 있어요. 새로 만들 필요 없어요.")
         return
     opening_flow[chat_id] = {"sheet": sheet, "step": "weekdays"}
@@ -1308,7 +1324,9 @@ async def handle_opening_step(update: Update, context: ContextTypes.DEFAULT_TYPE
         if text.strip() in ("없음", "없어", "나중에"):
             st["students"] = []
         else:
-            st["students"] = [n.strip() for n in re.split(r"[,\n]+", text) if n.strip()]
+            # 쉼표·줄바꿈뿐 아니라 띄어쓰기로 나열해도 각각 한 명으로 인식
+            # (한글 이름엔 내부 공백이 없으므로 공백 분리가 안전)
+            st["students"] = [n.strip() for n in re.split(r"[,\n\s]+", text) if n.strip()]
         st["step"] = "confirm"
         wd = "·".join(WD[i] for i in st["weekdays"])
         hr = st.get("hours") or "없음 (나중에)"
