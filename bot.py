@@ -82,6 +82,71 @@ holiday_flow: dict[int, dict] = {}
 chat_history: dict[int, list] = {}
 
 
+# ── 백업 · 저장 · 실행취소 ──────────────────────────────────────
+BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+os.makedirs(BACKUP_DIR, exist_ok=True)
+BACKUPS_KEEP = 20            # 파일별 백업 보관 개수
+_last_change_path = os.path.join(DATA_DIR, "last_change.json")
+
+
+def backup_file(path):
+    """저장 직전 기존 파일을 타임스탬프로 백업. 파일별 최근 BACKUPS_KEEP개만 유지."""
+    if not path or not os.path.exists(path):
+        return None
+    base = os.path.basename(path)
+    ts = datetime.datetime.now(KST).strftime("%Y%m%d-%H%M%S")
+    dst = os.path.join(BACKUP_DIR, f"{base}.{ts}.bak")
+    try:
+        import shutil
+        shutil.copy2(path, dst)
+    except Exception as e:
+        log.warning("백업 실패 %s: %s", path, e)
+        return None
+    # 오래된 백업 정리
+    try:
+        olds = sorted(f for f in os.listdir(BACKUP_DIR) if f.startswith(base + "."))
+        for f in olds[:-BACKUPS_KEEP]:
+            os.remove(os.path.join(BACKUP_DIR, f))
+    except Exception:
+        pass
+    return dst
+
+
+def save_wb(wb, path, undoable=False, desc=""):
+    """워크북을 저장하되, 덮어쓰기 전 기존 파일을 백업한다.
+    undoable=True면 '실행취소'로 되돌릴 수 있게 마지막 변경을 기록."""
+    backup = backup_file(path)
+    wb.save(path)
+    if undoable:
+        try:
+            with open(_last_change_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {"path": path, "backup": backup, "desc": desc,
+                     "ts": datetime.datetime.now(KST).isoformat()},
+                    f, ensure_ascii=False,
+                )
+        except Exception as e:
+            log.warning("실행취소 기록 실패: %s", e)
+    return backup
+
+
+# 음성·오타로 명령어 사이에 낀 띄어쓰기를 복원 (예: '시간 표' → '시간표')
+_GLUE_WORDS = [
+    "수업시간표", "주간시간표", "시간표", "출석부", "미리보기", "실행취소", "되돌리기",
+    "방금취소", "요일추가", "주간보고서", "관리자등록", "도움말", "안내문",
+    "신규개강", "신규등록", "공휴일", "휴강",
+    "이번주", "저번주", "지난주", "다음주", "이번달", "지난달",
+]
+_GLUE_RE = [(re.compile(r"\s*".join(map(re.escape, w))), w) for w in _GLUE_WORDS]
+
+
+def deglue(text):
+    """알려진 명령어 안에 낀 공백을 붙여 인식률을 높인다."""
+    for pat, w in _GLUE_RE:
+        text = pat.sub(w, text)
+    return text
+
+
 # ── 저장소 헬퍼 ────────────────────────────────────────────────
 def month_filename(year, month):
     return f"{str(year)[2:]}.{month:02d} 출석부.xlsx"
@@ -657,9 +722,13 @@ GUIDE = f"""📋 <b>{SUBJ_NAME} 출석부 봇 사용법</b>
    → 개강 때 받은 수업 시간이 <b>시간표에 자동 추가</b>, 종강하면 그 주까지만 뜨고 <b>다음 주부터 빠져요</b>
    ※ 학생 한 명은 <b>신규등록</b> · <b>퇴원</b> 으로
 • <b>점검</b>: 이상한 날짜(중복·다른 달) 확인·정리
+• <b>실행취소</b>: <u>방금 입력을 잘못했을 때</u> 직전 상태로 되돌리기 (매 입력 전 자동 백업)
+• <b>통계</b>: 출석률·결석·과제 미제출 집계
+   → <code>통계</code>(전체) · <code>통계 초5A</code> · <code>통계 이번주</code> · <code>통계 지난달</code>
 
 ━━━━━━━━━━━━━━━
 궁금하면 아무 때나 <b>도움말</b> 보내면 이 안내가 다시 떠요. 🙂
+음성입력으로 <u>띄어쓰기가 조금 껴도</u>(예: '시간 표') 알아들어요.
 
 ※ 이 채팅은 <b>1:1 개인 채팅</b>이라 다른 쌤은 못 봐요. 편하게 쓰세요.
 ※ 오류나 보완할 점은 <b>태일쌤</b>에게 알려주세요. 열심히 고쳐보겠습니다! 🙇"""
@@ -927,11 +996,170 @@ async def cmd_add_weekday(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     y, _ = current_ym()
     n = ac.add_weekday_labels(wb, y)
-    wb.save(path)
+    save_wb(wb, path)
     await update.message.reply_text(
         f"✅ 날짜 {n}개에 요일을 붙였어요 (예: 7/15 → 7/15(수)).\n"
         "받아보려면 '출석부' 보내세요."
     )
+
+
+async def cmd_undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """마지막 출석 입력을 직전 상태로 되돌린다."""
+    if not os.path.exists(_last_change_path):
+        await update.message.reply_text("↩️ 되돌릴 최근 입력이 없어요.")
+        return
+    try:
+        with open(_last_change_path, encoding="utf-8") as f:
+            ch = json.load(f)
+    except Exception:
+        await update.message.reply_text("↩️ 되돌릴 기록을 읽지 못했어요.")
+        return
+    path, backup, desc = ch.get("path"), ch.get("backup"), ch.get("desc", "")
+    if not backup or not os.path.exists(backup):
+        await update.message.reply_text(
+            "↩️ 이 입력은 백업본이 없어 되돌릴 수 없어요. (새 파일 생성 등)"
+        )
+        return
+    try:
+        import shutil
+        # 되돌리기도 되돌릴 수 있게, 지금 상태를 한 번 더 백업
+        backup_file(path)
+        shutil.copy2(backup, path)
+    except Exception as e:
+        await update.message.reply_text(f"↩️ 되돌리기 실패: {e}")
+        return
+    try:
+        os.remove(_last_change_path)  # 한 번만 되돌리도록
+    except Exception:
+        pass
+    ts = (ch.get("ts") or "")[:16].replace("T", " ")
+    await update.message.reply_text(
+        f"↩️ 되돌렸어요 — <b>{desc}</b> 직전 상태로 복원했어요.\n"
+        f"(입력 시각: {ts})\n확인하려면 '출석부' 또는 미리보기 해보세요.",
+        parse_mode="HTML",
+    )
+
+
+def _collect_stats(ws, dates):
+    """한 시트에서 dates 기간의 학생별 출결·과제 집계."""
+    roster = ac.get_roster(ws)
+    per = {}
+    for nm in roster:
+        per[nm] = {"total": 0, "absent": 0, "late": 0, "hw_miss": 0, "hw_half": 0}
+    for ds in dates:
+        top = ac.find_date_block(ws, ds)
+        if top is None:
+            continue
+        for nm, col in roster.items():
+            av = ws.cell(top + ac.ROW_OFFSET["출석"], col).value
+            if av not in (None, ""):
+                per[nm]["total"] += 1
+                if ac.is_absent(av):
+                    per[nm]["absent"] += 1
+                elif ac._is_late(str(av)) or "조퇴" in str(av):
+                    per[nm]["late"] += 1
+            hv = ws.cell(top + ac.ROW_OFFSET["과제수행"], col).value
+            if hv not in (None, ""):
+                c = ac._homework_color(hv)
+                if c == ac.COLOR_RED:
+                    per[nm]["hw_miss"] += 1
+                elif c == ac.COLOR_BLUE:
+                    per[nm]["hw_half"] += 1
+    return per
+
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """기간·반별 출결/과제 집계. 예) 통계 / 통계 초5A / 통계 이번주 / 통계 지난달"""
+    chat_id = update.effective_chat.id
+    remember_chat(chat_id)
+    text = " ".join(context.args) if context.args else ""
+    today = datetime.datetime.now(KST).date()
+
+    # 기간 결정
+    if any(k in text for k in ("이번주", "금주")):
+        mon, sun = rpt.week_bounds(today)
+        wb, _, _ = load_wb_for_date(f"{mon.month}/{mon.day}")
+        period, mode = f"{mon.month}/{mon.day}~{sun.month}/{sun.day}", ("week", mon, sun)
+    elif any(k in text for k in ("저번주", "지난주")):
+        mon, sun = rpt.week_bounds(today - datetime.timedelta(days=7))
+        wb, _, _ = load_wb_for_date(f"{mon.month}/{mon.day}")
+        period, mode = f"{mon.month}/{mon.day}~{sun.month}/{sun.day}", ("week", mon, sun)
+    else:
+        mm = re.search(r"(\d{1,2})\s*월", text)
+        month = (12 if today.month == 1 else today.month - 1) if "지난달" in text \
+            else (int(mm.group(1)) if mm else today.month)
+        wb, _, _ = load_wb_for_date(f"{month}/1")
+        period, mode = f"{month}월", ("month", None, None)
+    if wb is None:
+        wb, _ = load_latest_wb()
+    if wb is None:
+        await update.message.reply_text("출석부 파일이 없어요.")
+        return
+
+    # 반 필터
+    tokens = [t for t in text.split() if not re.search(r"주|달|월|통계|집계|현황|리포트", t)]
+    want = None
+    for t in tokens:
+        m = next((s for s in wb.sheetnames if s.replace(" ", "") == t.replace(" ", "")), None)
+        if m:
+            want = m
+            break
+    sheets = [want] if want else [s for s in wb.sheetnames if ac.get_roster(wb[s])]
+
+    def dates_for(sheet):
+        if mode[0] == "week":
+            return rpt.week_dates(wb[sheet], mode[1], mode[2], mode[2].year)
+        return ac.sheet_dates(wb).get(sheet, [])
+
+    # 집계
+    agg = {}          # sheet -> per-student
+    overall_abs, overall_hw = {}, {}
+    cls_line = []
+    for sheet in sheets:
+        per = _collect_stats(wb[sheet], dates_for(sheet))
+        agg[sheet] = per
+        tot = sum(v["total"] for v in per.values())
+        ab = sum(v["absent"] for v in per.values())
+        rate = round((tot - ab) / tot * 100) if tot else None
+        cls_line.append((sheet, rate, tot, ab))
+        for nm, v in per.items():
+            if v["absent"]:
+                overall_abs[f"{nm}({sheet})"] = v["absent"]
+            if v["hw_miss"]:
+                overall_hw[f"{nm}({sheet})"] = v["hw_miss"]
+
+    def _rank(d, n=6):
+        items = sorted(d.items(), key=lambda x: -x[1])[:n]
+        return ", ".join(f"{k} {v}회" for k, v in items) if items else "없음"
+
+    if want:  # 특정 반: 자세히
+        per = agg[want]
+        tot = sum(v["total"] for v in per.values())
+        ab = sum(v["absent"] for v in per.values())
+        rate = round((tot - ab) / tot * 100) if tot else 0
+        abs_r = _rank({nm: v["absent"] for nm, v in per.items() if v["absent"]})
+        hw_r = _rank({nm: v["hw_miss"] for nm, v in per.items() if v["hw_miss"]})
+        half = sum(v["hw_half"] for v in per.values())
+        lines = [
+            f"📊 <b>{want}</b> 통계 · {period}",
+            f"• 출석률 <b>{rate}%</b> (기록 {tot}칸 · 결석 {ab})",
+            f"• 결석: {abs_r}",
+            f"• 과제 미제출: {hw_r}" + (f"  |  부분제출 {half}회" if half else ""),
+        ]
+    else:  # 전체 요약
+        gtot = sum(l[2] for l in cls_line)
+        gab = sum(l[3] for l in cls_line)
+        grate = round((gtot - gab) / gtot * 100) if gtot else 0
+        lines = [f"📊 <b>{SUBJ_NAME} 전체 통계</b> · {period}",
+                 f"• 전체 출석률 <b>{grate}%</b> (기록 {gtot}칸 · 결석 {gab})",
+                 "",
+                 "<b>반별 출석률</b>"]
+        for sheet, rate, tot, ab in sorted(cls_line, key=lambda x: (x[1] is None, x[1] or 0)):
+            lines.append(f"• {sheet}: {rate}% ({ab} 결석)" if rate is not None else f"• {sheet}: 기록 없음")
+        lines += ["", f"<b>결석 많은 학생</b>\n{_rank(overall_abs)}",
+                  "", f"<b>과제 미제출</b>\n{_rank(overall_hw)}"]
+    lines.append("\n특정 반: '통계 초5A' · 기간: '통계 이번주' / '통계 지난달'")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1248,7 +1476,7 @@ async def start_opening(update: Update, context: ContextTypes.DEFAULT_TYPE, shee
                     if one not in names:
                         names.append(one)
             ac.set_roster(wb, sheet, names)
-            wb.save(path)
+            save_wb(wb, path)
             await update.message.reply_text(
                 f"🔧 '{sheet}' 명단이 한 칸에 뭉쳐 있어 {len(names)}명으로 나눠 고쳤어요.\n"
                 f"• {', '.join(names)}\n이제 출석 입력이 될 거예요.",
@@ -1353,7 +1581,7 @@ async def handle_opening_step(update: Update, context: ContextTypes.DEFAULT_TYPE
         except ValueError as e:
             await update.message.reply_text(f"⚠️ {e}")
             return
-        wb.save(path)
+        save_wb(wb, path)
         sch = load_schedules(); sch[st["sheet"]] = st["weekdays"]; save_schedules(sch)
         if st["time"]:
             tms = load_times(); tms[st["sheet"]] = {str(d): st["time"] for d in st["weekdays"]}; save_times(tms)
@@ -1466,7 +1694,7 @@ async def handle_stray_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
         ac.remove_block(ws, top)
         done.append(f"{sheet} {date}")
     if done:
-        wb.save(path)
+        save_wb(wb, path)
     msg = f"✅ {len(done)}건 정리했어요: {', '.join(done)}" if done else "지운 게 없어요."
     if skipped:
         msg += f"\n⚠️ 그새 내용이 생겨서 건너뛴 것: {', '.join(skipped)}"
@@ -1552,7 +1780,7 @@ async def handle_holiday_confirm(update: Update, context: ContextTypes.DEFAULT_T
         ac.set_holiday_block(ws, top, last_col, st["text"])
         done.append(sheet)
     if done:
-        wb.save(path)
+        save_wb(wb, path)
     await update.message.reply_text(
         f"✅ <b>{date_str}</b> <b>{st['text']}</b> 으로 지정했어요. ({', '.join(done)})\n"
         "그 날은 출석 알림도 안 가요.", parse_mode="HTML")
@@ -1580,7 +1808,7 @@ async def undo_holiday(update: Update, context: ContextTypes.DEFAULT_TYPE, date_
             f"<b>{date_str}</b> 은 휴강이 아니에요.", parse_mode="HTML")
         return
     if done:
-        wb.save(path)
+        save_wb(wb, path)
     names = {v for v in was.values() if v}
     msg = f"✅ <b>{date_str}</b> 휴강을 취소했어요. ({', '.join(done)})"
     if names - {"휴강"}:
@@ -1601,7 +1829,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if first_contact:
         await update.message.reply_text(GUIDE, parse_mode="HTML")
 
-    low = text.lstrip("/").strip()
+    low = deglue(text.lstrip("/").strip())  # 음성·오타 띄어쓰기 보정 (명령 인식용)
     parts = low.split()
     kw = parts[0] if parts else ""
 
@@ -1690,7 +1918,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             written, warnings = ac.write_attendance(
                 wb, info["sheet"], info["date"], info["data"], enroll=enroll
             )
-            wb.save(path)
+            save_wb(wb, path, undoable=True, desc=f"{info['sheet']} {info['date']} 입력")
             life = info["data"].get("학적") or {}
             if life:  # 학적 변동을 재적 기록에 반영
                 apply_enroll_events(info["sheet"], info["date"], life)
@@ -1746,6 +1974,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_members(update, context)
     if low in ("요일추가", "날짜요일", "요일넣기"):
         return await cmd_add_weekday(update, context)
+    if low in ("실행취소", "되돌리기", "방금취소", "입력취소", "취소하기", "복원"):
+        return await cmd_undo(update, context)
+    if low in ("통계", "집계", "현황", "리포트"):
+        context.args = parts[1:]
+        return await cmd_stats(update, context)
     if low in ("설정초기화", "기본설정복원", "반목록갱신"):
         return await cmd_reset_config(update, context)
     if low in ("주간보고서", "보고서", "주간출결"):
