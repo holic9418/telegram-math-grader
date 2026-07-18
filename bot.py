@@ -45,7 +45,7 @@ logging.basicConfig(
 log = logging.getLogger("attendance-bot")
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-4-8")
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
 # 과목 선택 (math/english/korean). 없으면 수학.
 SUBJECT = os.environ.get("SUBJECT", "math")
 SUBJ = subjects.get(SUBJECT)
@@ -570,6 +570,7 @@ async def parse_message(text, wb):
     resp = await claude.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=1500,
+        thinking={"type": "disabled"},  # 파싱은 생각 불필요 — 빠르고 저렴하게
         system=PARSE_SYSTEM,
         messages=[{"role": "user", "content": user}],
     )
@@ -595,7 +596,8 @@ async def chat_reply(chat_id, text):
     history = chat_history.get(chat_id, [])
     history.append({"role": "user", "content": text})
     resp = await claude.messages.create(
-        model=CLAUDE_MODEL, max_tokens=800, system=CHAT_SYSTEM, messages=history
+        model=CLAUDE_MODEL, max_tokens=800, thinking={"type": "disabled"},
+        system=CHAT_SYSTEM, messages=history
     )
     reply = "".join(b.text for b in resp.content if b.type == "text")
     history.append({"role": "assistant", "content": reply})
