@@ -2024,10 +2024,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parsed = await parse_message(text, parse_wb)
     except Exception as e:
         log.error("parse_message 실패: %s: %s", type(e).__name__, e)
+        detail = str(e)[:300]
+        hint = ""
+        if "credit balance" in detail.lower() or "too low" in detail.lower():
+            hint = ("\n💳 Anthropic API 크레딧이 부족한 것 같아요. "
+                    "console.anthropic.com → Billing 에서 충전하면 바로 됩니다.")
         await update.message.reply_text(
             "⚠️ 지금 입력을 처리하지 못했어요 (AI 응답 실패).\n"
-            "• 잠시 후 다시 보내보세요.\n"
-            f"• 계속되면 관리자에게 알려주세요. (원인: {type(e).__name__})"
+            f"• 원인: {type(e).__name__}\n"
+            f"• 상세: {detail}{hint}"
         )
         return
 
