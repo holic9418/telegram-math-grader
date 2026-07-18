@@ -2020,10 +2020,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-    parsed = await parse_message(text, parse_wb)
+    try:
+        parsed = await parse_message(text, parse_wb)
+    except Exception as e:
+        log.error("parse_message 실패: %s: %s", type(e).__name__, e)
+        await update.message.reply_text(
+            "⚠️ 지금 입력을 처리하지 못했어요 (AI 응답 실패).\n"
+            "• 잠시 후 다시 보내보세요.\n"
+            f"• 계속되면 관리자에게 알려주세요. (원인: {type(e).__name__})"
+        )
+        return
 
     if parsed.get("type") != "attendance":
-        reply = await chat_reply(chat_id, text)
+        try:
+            reply = await chat_reply(chat_id, text)
+        except Exception as e:
+            log.error("chat_reply 실패: %s: %s", type(e).__name__, e)
+            reply = f"지금은 답변을 못 드리겠어요. 잠시 후 다시 시도해 주세요. (원인: {type(e).__name__})"
         await update.message.reply_text(reply)
         return
 
