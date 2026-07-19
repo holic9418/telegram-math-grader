@@ -754,10 +754,11 @@ GUIDE = f"""📋 <b>{SUBJ_NAME} 출석부 봇 사용법</b>
 • <b>실행취소</b>: <u>방금 입력을 잘못했을 때</u> 직전 상태로 되돌리기 (매 입력 전 자동 백업)
 • <b>통계</b>: 출석률·결석·과제 미제출 집계
    → <code>통계</code>(전체) · <code>통계 초5A</code> · <code>통계 이번주</code> · <code>통계 지난달</code>
-• <b>진도표</b>: 단원별 유형서·심화유형서·단원평가 O/X 관리
+• <b>진도표</b>: 단원별 항목 O/X 관리 (기본: 유형서·심화유형서·단원평가 × 수정완료·밴드완료)
    → 단원 설정: <code>초5A 진도단원 분수의 나눗셈, 각기둥과 각뿔, …</code>
+   → 항목/단계 바꾸기(반별): <code>초5A 진도항목 개념서, 문제집</code> · <code>초5A 진도단계 1차, 2차</code>
    → 입력: <code>원서진 1단원 유형서 수정완료</code> (X·취소도 됨)
-   → 보기: <code>초5A 진도</code>(반 전체) · <code>원서진 진도</code>(개인)
+   → 보기: <code>초5A 진도</code>(반 전체) · <code>원서진 진도</code>(개인) · 설정확인 <code>초5A 진도설정</code>
 
 ━━━━━━━━━━━━━━━
 궁금하면 아무 때나 <b>도움말</b> 보내면 이 안내가 다시 떠요. 🙂
@@ -1197,7 +1198,9 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── 진도표 ──────────────────────────────────────────────────────
 async def cmd_progress_units(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
-    """반 진도 단원 설정/조회. 예) '초5A 진도단원 분수의 나눗셈, 각기둥과 각뿔, ...'"""
+    """반 진도표의 단원/항목/단계 설정·조회.
+    예) '초5A 진도단원 분수의 나눗셈, 각기둥과 각뿔' / '초5A 진도항목 개념서, 문제집'
+        '초5A 진도단계 1차, 2차' / '초5A 진도설정'(전체 조회)"""
     latest, _ = load_latest_wb()
     if latest is None:
         await update.message.reply_text("아직 출석부 파일이 없어요.")
@@ -1210,30 +1213,57 @@ async def cmd_progress_units(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await update.message.reply_text("어느 반인지 콕 집어주세요: " + ", ".join(cands))
         return
     sheet = cands[0]
-    m = re.search(r'진도\s*단원\s*(.*)$', text, re.S)
-    body = (m.group(1) if m else "").strip()
+    # 어떤 항목을 설정하나
+    if re.search(r'진도\s*항목', text):
+        field, label = "items", "항목"
+    elif re.search(r'진도\s*단계', text):
+        field, label = "steps", "단계"
+    elif re.search(r'진도\s*설정', text):
+        field, label = None, None   # 전체 조회
+    else:
+        field, label = "units", "단원"
+
+    def show_all():
+        u, it, st = prog_cfg(sheet)
+        ul = "\n".join(f"  {i+1}. {x}" for i, x in enumerate(u)) or "  (없음)"
+        return (f"📚 <b>{sheet}</b> 진도표 설정\n"
+                f"• 단원:\n{ul}\n"
+                f"• 항목: {', '.join(it)}\n"
+                f"• 단계: {', '.join(st)}")
+
     prog = load_progress()
     cur = prog.get(sheet, {})
-    if not body:  # 조회
-        units, _, _ = prog_cfg(sheet)
-        if not units:
+    m = re.search(r'진도\s*(?:단원|항목|단계|설정)\s*(.*)$', text, re.S)
+    body = (m.group(1) if m else "").strip()
+
+    if field is None or not body:   # 조회
+        if field in ("units",) and not prog_cfg(sheet)[0]:
             await update.message.reply_text(
                 f"'{sheet}'는 아직 진도 단원이 없어요.\n"
                 "예) 초5A 진도단원 분수의 나눗셈, 각기둥과 각뿔, 소수의 나눗셈")
             return
-        lines = "\n".join(f"{i+1}. {u}" for i, u in enumerate(units))
-        await update.message.reply_text(f"📚 <b>{sheet}</b> 진도 단원\n{lines}", parse_mode="HTML")
+        await update.message.reply_text(show_all(), parse_mode="HTML")
         return
-    units = [re.sub(r'^\s*\d+\s*[.)]\s*', '', u).strip()
-             for u in re.split(r'[,、\n]+', body) if u.strip()]
-    cur["units"] = units
+
+    vals = [re.sub(r'^\s*\d+\s*[.)]\s*', '', u).strip()
+            for u in re.split(r'[,、\n]+', body) if u.strip()]
+    if not vals:
+        await update.message.reply_text(f"{label}을(를) 못 읽었어요.")
+        return
+    cur[field] = vals
     prog[sheet] = cur
     save_progress(prog)
-    lines = "\n".join(f"{i+1}. {u}" for i, u in enumerate(units))
-    await update.message.reply_text(
-        f"✅ <b>{sheet}</b> 진도 단원 {len(units)}개 설정했어요.\n{lines}\n\n"
-        "이제 <code>원서진 1단원 유형서 수정완료</code> 처럼 입력하고, "
-        "<code>초5A 진도</code>로 표를 볼 수 있어요.", parse_mode="HTML")
+    if field == "units":
+        lines = "\n".join(f"{i+1}. {u}" for i, u in enumerate(vals))
+        await update.message.reply_text(
+            f"✅ <b>{sheet}</b> 진도 단원 {len(vals)}개 설정했어요.\n{lines}\n\n"
+            "이제 <code>원서진 1단원 유형서 수정완료</code> 처럼 입력하고, "
+            "<code>초5A 진도</code>로 표를 볼 수 있어요.", parse_mode="HTML")
+    else:
+        await update.message.reply_text(
+            f"✅ <b>{sheet}</b> 진도 {label} 설정: {', '.join(vals)}\n"
+            f"입력 예) <code>원서진 1단원 {vals[0]} "
+            f"{prog_cfg(sheet)[2][0]}</code>", parse_mode="HTML")
 
 
 def _prog_students(text, wb):
@@ -2196,12 +2226,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── 진도표 ──
     if any(k in low for k in ("진도단원", "진도 단원", "진도항목", "진도단계", "진도설정")):
         return await cmd_progress_units(update, context, text)
-    # 진도 입력: 진도 항목 + (단계/완료/N단원)이 함께 있을 때만 O/X 마킹
-    # (그냥 '단원평가 90점' 같은 시험 입력과 헷갈리지 않게 조건을 좁힘)
-    _p_item = any(k in text for k in ("유형서", "심화유형서", "단원평가", "유형", "심화"))
-    if _p_item and (any(k in text for k in ("수정", "밴드", "완료", "끝", "했"))
-                    or re.search(r"\d+\s*단원", text)):
-        return await cmd_progress_mark(update, context, text)
+    # 진도 입력: 단계어(수정/밴드/완료)가 있고 + (N단원 or 항목)이 있으면 O/X 마킹
+    # (그냥 '단원평가 90점' 같은 시험 입력과 헷갈리지 않게 단계어를 필수로)
+    if any(k in text for k in ("수정", "밴드", "완료")):
+        _has_unit = re.search(r"\d+\s*단원", text)
+        _p_item = any(k in text for k in ("유형", "심화", "단원평가"))
+        if not _p_item:   # 반별 커스텀 항목도 인식
+            for v in load_progress().values():
+                if any(it and it in text for it in (v.get("items") or [])):
+                    _p_item = True
+                    break
+        if _has_unit or _p_item:
+            return await cmd_progress_mark(update, context, text)
     # 진도 조회: '초5A 진도' / '원서진 진도' (딱 그 형태일 때만)
     if re.fullmatch(r"\s*.+?\s*진도표?\s*", text) and "진도" in low:
         return await cmd_progress_view(update, context, text)
