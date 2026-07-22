@@ -2290,7 +2290,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_progress_units(update, context, text)
     # 진도 입력: 단계어(수정/밴드/완료)가 있고 + (N단원 or 항목)이 있으면 O/X 마킹
     # (그냥 '단원평가 90점' 같은 시험 입력과 헷갈리지 않게 단계어를 필수로)
-    if any(k in text for k in ("수정", "밴드", "완료")):
+    # 단, '유형서 수정'을 수업내용으로 적은 출석 입력이 진도로 새지 않게 출결 신호가
+    # 있으면 진도 라우팅을 건너뛴다(진도 입력엔 이런 단어가 안 나온다).
+    _attend_signal = any(k in text for k in (
+        "결석", "지각", "조퇴", "외출", "무단", "출석", "미지참", "미수령", "미제출",
+        "다음과제", "다음 숙제", "다음숙제"))
+    if not _attend_signal and any(k in text for k in ("수정", "밴드", "완료")):
         _has_unit = re.search(r"\d+\s*단원", text)
         _p_item = any(k in text for k in ("유형", "심화", "단원평가"))
         if not _p_item:   # 반별 커스텀 항목도 인식
