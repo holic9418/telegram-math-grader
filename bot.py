@@ -2403,12 +2403,23 @@ async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
         _sent_reminders.discard(k)
 
     wd = str(now.weekday())  # '0'=월 … '6'=일
+    wb, _ = load_current_wb()  # 이번 달 출석부 (없으면 None)
+    date_str = f"{now.month}/{now.day}"
     # 지금 확인 시각이 된 반들 추리기 (요일별 표에서 오늘 요일의 시각을 찾음)
     due = []
     for cls, table in load_times().items():
-        tm = table.get(wd) if isinstance(table, dict) else None
+        if not isinstance(table, dict):
+            continue
+        tm = table.get(wd)
         if not tm:
-            continue  # 오늘 수업(알림) 없는 반은 건너뜀
+            # 요일엔 없지만 오늘 날짜 블록이 시트에 있으면(보강·날짜변경 등) 대체 시각으로 확인
+            if wb is None or cls not in wb.sheetnames:
+                continue
+            if ac.find_date_block(wb[cls], date_str) is None:
+                continue
+            tm = next((v for v in table.values() if v), None)  # 이 반의 아무 알림 시각
+            if not tm:
+                continue
         try:
             hh, mm = (int(x) for x in str(tm).split(":"))
         except (ValueError, AttributeError):
@@ -2421,9 +2432,7 @@ async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
     if not due:
         return
 
-    wb, _ = load_current_wb()  # 이번 달 출석부 (없으면 None)
     teachers = load_teachers()
-    date_str = f"{now.month}/{now.day}"
     for cls, key in due:
         _sent_reminders.add(key)  # 오늘 이 반은 확인 완료 (재확인·중복발송 방지)
         recorded = None
