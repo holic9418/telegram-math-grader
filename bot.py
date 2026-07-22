@@ -615,6 +615,9 @@ CHAT_SYSTEM = """너는 학원 선생님을 돕는 '출석부 텔레그램 봇'�
 - 출석부 데이터는 서버 파일(xlsx)에 실제로 저장·조회된다. "나는 AI라 접근 못 한다"는 식으로 말하지 마라.
 - 파일을 받고 싶어 하면 '출석부' 또는 '/download' 라고 보내면 된다고 안내해라. 특정 달은 '출석부 7월' 처럼.
 - 출석 입력 예시: '초5 오늘 남우현 결석, 나머지 출석. 수업 분수나눗셈'.
+- 매우 중요: 파일을 실제로 바꾸는 작업(날짜 변경/삭제/수정 등)을 네가 방금 처리했다고 말하지 마라.
+  하지도 않은 일을 '완료했습니다'라고 절대 말하지 마라. 그런 기능이 명령으로 있으면 사용법을,
+  없으면 '아직 그 기능은 없어요'라고 솔직히 안내하라. (예: 날짜 변경은 '고1 7/21 → 7/22')
 - 수학 개념 질문 등에는 평소처럼 친절히 답해도 된다. 답은 간결하게."""
 
 
@@ -751,6 +754,7 @@ GUIDE = f"""📋 <b>{SUBJ_NAME} 출석부 봇 사용법</b>
    → 개강 때 받은 수업 시간이 <b>시간표에 자동 추가</b>, 종강하면 그 주까지만 뜨고 <b>다음 주부터 빠져요</b>
    ※ 학생 한 명은 <b>신규등록</b> · <b>퇴원</b> 으로
 • <b>점검</b>: 이상한 날짜(중복·다른 달) 확인·정리
+• <b>날짜 변경</b>: <code>고1 7/21 → 7/22</code> (그 칸의 기록은 그대로, 날짜만 바뀜)
 • <b>실행취소</b>: <u>방금 입력을 잘못했을 때</u> 직전 상태로 되돌리기 (매 입력 전 자동 백업)
 • <b>통계</b>: 출석률·결석·과제 미제출 집계
    → <code>통계</code>(전체) · <code>통계 초5A</code> · <code>통계 이번주</code> · <code>통계 지난달</code>
@@ -1194,6 +1198,58 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   "", f"<b>과제 미제출</b>\n{_rank(overall_hw)}"]
     lines.append("\n특정 반: '통계 초5A' · 기간: '통계 이번주' / '통계 지난달'")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def cmd_change_date(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
+    """한 반의 날짜 하나를 다른 날짜로 바꾼다(칸 안의 기록은 그대로 유지).
+    예) '고1 7/21 -> 7/22' / '고1 7/21일 날짜 7/22로 변경'"""
+    latest, _ = load_latest_wb()
+    if latest is None:
+        await update.message.reply_text("아직 출석부 파일이 없어요.")
+        return
+    cands = _match_preview_sheet(text, latest.sheetnames)
+    if not cands:
+        await update.message.reply_text("어느 반인지 알려주세요. 예) 고1 7/21 → 7/22")
+        return
+    if len(cands) > 1:
+        await update.message.reply_text("어느 반인지 콕 집어주세요: " + ", ".join(cands))
+        return
+    sheet = cands[0]
+    ds = re.findall(r'(\d{1,2})\s*[/.월]\s*(\d{1,2})', text)
+    if len(ds) < 2:
+        await update.message.reply_text("바꿀 날짜 두 개를 알려주세요. 예) 고1 7/21 → 7/22")
+        return
+    old = f"{int(ds[0][0])}/{int(ds[0][1])}"
+    new = f"{int(ds[1][0])}/{int(ds[1][1])}"
+    wb, path, month = load_wb_for_date(old)
+    if wb is None:
+        await update.message.reply_text(f"{month}월 출석부 파일이 없어요.")
+        return
+    if sheet not in wb.sheetnames:
+        await update.message.reply_text(f"'{sheet}' 반을 그 달 파일에서 못 찾았어요.")
+        return
+    ws = wb[sheet]
+    top = ac.find_date_block(ws, old)
+    if top is None:
+        await update.message.reply_text(f"'{sheet}'에 {old} 날짜가 없어요. (미리보기로 확인해 보세요)")
+        return
+    if ac.find_date_block(ws, new) is not None:
+        await update.message.reply_text(
+            f"'{sheet}'에 이미 {new} 가 있어서 바꿀 수 없어요. 먼저 정리해 주세요.")
+        return
+    year = current_ym()[0]
+    new_label = ac.date_label(new, year)
+    try:
+        ws.cell(top, 1).value = new_label
+    except Exception as e:
+        await update.message.reply_text(f"날짜 칸을 바꾸지 못했어요: {e}")
+        return
+    save_wb(wb, path, undoable=True, desc=f"{sheet} 날짜 {old}→{new}")
+    await update.message.reply_text(
+        f"✅ <b>{sheet}</b> {old} → <b>{new_label}</b> 로 바꿨어요.\n"
+        "그 날짜 칸의 출석·숙제 기록은 그대로 유지돼요.\n"
+        f"확인: <code>{sheet} {new} 미리보기</code> · 되돌리기: <code>실행취소</code>",
+        parse_mode="HTML")
 
 
 # ── 진도표 ──────────────────────────────────────────────────────
@@ -2223,6 +2279,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_reset_config(update, context)
     if low in ("주간보고서", "보고서", "주간출결"):
         return await cmd_report(update, context)
+    # ── 날짜 변경: '고1 7/21 → 7/22' / '고1 7/21일 날짜 7/22로 변경' ──
+    _dtoks = re.findall(r'\d{1,2}\s*[/.월]\s*\d{1,2}', text)
+    if len(_dtoks) >= 2 and (
+        re.search(r'\d\s*(?:->|→|~>|=>)\s*\d', text)
+        or any(k in low for k in ("날짜", "변경", "바꿔", "바꾸"))):
+        return await cmd_change_date(update, context, text)
     # ── 진도표 ──
     if any(k in low for k in ("진도단원", "진도 단원", "진도항목", "진도단계", "진도설정")):
         return await cmd_progress_units(update, context, text)
