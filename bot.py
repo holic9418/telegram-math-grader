@@ -2415,6 +2415,8 @@ async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
     for cls, table in load_times().items():
         if not isinstance(table, dict):
             continue
+        if class_input_blocked(cls, date_str):
+            continue  # 종강한 반은 종강 주 이후 알림 보내지 않음
         tm = table.get(wd)
         if not tm:
             # 요일엔 없지만 오늘 날짜 블록이 시트에 있으면(보강·날짜변경 등) 대체 시각으로 확인
@@ -2501,6 +2503,8 @@ def scan_backlog(wb, today):
                 continue  # 기준일 이전 옛 날짜는 알림 제외
             if dd >= today:
                 continue  # 오늘·미래는 당일 알림(reminder_job) 담당
+            if class_input_blocked(cls, ds):
+                continue  # 종강한 반은 밀린 알림도 제외
             if ac.attendance_recorded(ws, ds) is False:
                 miss.append(ds)
         if miss:
