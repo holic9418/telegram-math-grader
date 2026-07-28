@@ -414,6 +414,21 @@ def class_input_blocked(sheet, date_str):
     return datetime.date(y, dm, dd) > csun
 
 
+def class_alarm_blocked(sheet, date_str):
+    """알림 전용: 종강한 반은 '종강일 그날부터'(그 주 포함) 알림 제외.
+    (입력 차단보다 더 이른 시점부터 끊는다.)"""
+    closed = load_closed().get(sheet)
+    if not closed:
+        return False
+    y = datetime.date.today().year
+    try:
+        cm, cd = map(int, str(closed).split("/"))
+        dm, dd = map(int, str(date_str).split("/"))
+    except ValueError:
+        return False
+    return datetime.date(y, dm, dd) >= datetime.date(y, cm, cd)
+
+
 def class_off_timetable(sheet, closed):
     """종강한 반을 시간표에서 뺄 때인지. 입력 차단과 같은 기준으로,
     종강 주까지는 남기고 다음 주부터 뺀다. closed = load_closed() 결과."""
@@ -2415,8 +2430,8 @@ async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
     for cls, table in load_times().items():
         if not isinstance(table, dict):
             continue
-        if class_input_blocked(cls, date_str):
-            continue  # 종강한 반은 종강 주 이후 알림 보내지 않음
+        if class_alarm_blocked(cls, date_str):
+            continue  # 종강한 반은 종강일부터 알림 보내지 않음
         tm = table.get(wd)
         if not tm:
             # 요일엔 없지만 오늘 날짜 블록이 시트에 있으면(보강·날짜변경 등) 대체 시각으로 확인
@@ -2503,8 +2518,8 @@ def scan_backlog(wb, today):
                 continue  # 기준일 이전 옛 날짜는 알림 제외
             if dd >= today:
                 continue  # 오늘·미래는 당일 알림(reminder_job) 담당
-            if class_input_blocked(cls, ds):
-                continue  # 종강한 반은 밀린 알림도 제외
+            if class_alarm_blocked(cls, ds):
+                continue  # 종강한 반은 종강일부터 밀린 알림도 제외
             if ac.attendance_recorded(ws, ds) is False:
                 miss.append(ds)
         if miss:
