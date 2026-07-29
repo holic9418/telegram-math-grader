@@ -743,6 +743,22 @@ def rebuild_without_students(wb, sheet, drop_names):
     wb.move_sheet(sheet, offset=idx - wb.sheetnames.index(sheet))
 
 
+def _write_value(ws, r, c, val):
+    """(r,c) 셀에 값을 쓴다. 병합된 셀(읽기 전용)이면 그 병합을 먼저 풀고 쓴다.
+    소수 인원 반처럼 블록 전체가 한 칸으로 병합된 경우에도 안전하게 기록."""
+    cell = ws.cell(r, c)
+    if isinstance(cell, MergedCell):
+        for rng in list(ws.merged_cells.ranges):
+            if rng.min_row <= r <= rng.max_row and rng.min_col <= c <= rng.max_col:
+                try:
+                    ws.unmerge_cells(str(rng))
+                except Exception:
+                    ws.merged_cells.ranges.discard(rng)
+                break
+        cell = ws.cell(r, c)
+    cell.value = val
+
+
 def write_attendance(wb, sheet, date_str, data, enroll=None):
     """data 예:
        {'출석': {'김규림':'O','남우현':'X(결석)'},
@@ -833,22 +849,22 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
                     continue  # 퇴원/전출 이후 또는 등록 전 → 빈칸 유지
                 put(label, st, val)
         elif isinstance(block, str) and block.strip():
-            # 단체 문자열 → 라벨행 첫 학생칸(병합 앵커 아님)에 기록
+            # 단체 문자열 → 라벨행 첫 학생칸에 기록
             r = top + ROW_OFFSET[label]
-            ws.cell(r, STUDENT_FIRST_COL).value = block
+            _write_value(ws, r, STUDENT_FIRST_COL, block)
             written.append(f"{label} = {block}")
 
     for label in ('수업내용', '다음과제'):
         val = data.get(label)
         if isinstance(val, str) and val.strip():
             r = top + ROW_OFFSET[label]
-            ws.cell(r, STUDENT_FIRST_COL).value = val  # 병합 앵커
+            _write_value(ws, r, STUDENT_FIRST_COL, val)  # 병합돼 있으면 풀고 씀
             written.append(f"{label} = {val}")
 
     # 비고 행 라벨 변경 (일일테스트 등) — B열 라벨만 이 블록에서 교체
     new_label = data.get('비고라벨') or data.get('비고제목')
     if isinstance(new_label, str) and new_label.strip():
-        ws.cell(top + ROW_OFFSET['비고'], 2).value = new_label.strip()
+        _write_value(ws, top + ROW_OFFSET['비고'], 2, new_label.strip())
         written.append(f"비고 라벨 → {new_label.strip()}")
 
     return written, warnings

@@ -2226,16 +2226,30 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("해당 달 출석부 파일이 없어요. 파일을 보내거나 /생성 해주세요.")
                 return
             enroll = load_enroll().get(info["sheet"], {})
-            written, warnings = ac.write_attendance(
-                wb, info["sheet"], info["date"], info["data"], enroll=enroll
-            )
-            save_wb(wb, path, undoable=True, desc=f"{info['sheet']} {info['date']} 입력")
-            life = info["data"].get("학적") or {}
-            if life:  # 학적 변동을 재적 기록에 반영
-                apply_enroll_events(info["sheet"], info["date"], life)
+            try:
+                written, warnings = ac.write_attendance(
+                    wb, info["sheet"], info["date"], info["data"], enroll=enroll
+                )
+                save_wb(wb, path, undoable=True, desc=f"{info['sheet']} {info['date']} 입력")
+                life = info["data"].get("학적") or {}
+                if life:  # 학적 변동을 재적 기록에 반영
+                    apply_enroll_events(info["sheet"], info["date"], life)
+            except Exception as e:
+                log.error("기록 저장 실패: %s: %s | info=%s", type(e).__name__, e, info)
+                await update.message.reply_text(
+                    "⚠️ 확인은 됐는데 <b>기록 저장에 실패</b>했어요.\n"
+                    f"• 반/날짜: {info['sheet']} / {info['date']}\n"
+                    f"• 원인: {type(e).__name__}: {str(e)[:200]}\n"
+                    "다시 시도해 주세요. 계속되면 이 메시지를 저(관리자)에게 알려주세요.",
+                    parse_mode="HTML",
+                )
+                return
             msg = f"✅ 기록 완료 ({info['sheet']} {info['date']}) — {len(written)}건\n" + "\n".join(
                 "  • " + w for w in written
             )
+            if not written:
+                msg += ("\n(기록된 항목이 없어요 — 이름이 명단과 다르거나, "
+                        "그 반·날짜에 해당하는 내용이 없을 수 있어요.)")
             if warnings:
                 msg += "\n⚠️ " + " / ".join(warnings)
             await update.message.reply_text(msg)
