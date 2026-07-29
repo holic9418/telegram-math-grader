@@ -2359,7 +2359,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    except Exception:
+        pass
     try:
         parsed = await parse_message(text, parse_wb)
     except Exception as e:
@@ -2385,21 +2388,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # 날짜의 달에 해당하는 파일을 대상으로
-    target_wb, _, month = load_wb_for_date(parsed.get("date", "0/0"))
-    if target_wb is None:
+    # 날짜의 달에 해당하는 파일을 대상으로 (예외가 나도 조용히 죽지 않게 감쌈)
+    try:
+        target_wb, _, month = load_wb_for_date(parsed.get("date", "0/0"))
+        if target_wb is None:
+            await update.message.reply_text(
+                f"{month}월 출석부 파일이 없어요. 먼저 파일을 보내거나 /생성 해주세요."
+            )
+            return
+        if class_input_blocked(parsed.get("sheet"), parsed.get("date", "")):
+            await update.message.reply_text(
+                f"🛑 '{parsed.get('sheet')}' 반은 종강해서 그 날짜는 입력할 수 없어요."
+            )
+            return
+        preview, err = build_preview(target_wb, parsed)
+    except Exception as e:
+        log.error("미리보기 생성 실패: %s: %s | parsed=%s", type(e).__name__, e, parsed)
         await update.message.reply_text(
-            f"{month}월 출석부 파일이 없어요. 먼저 파일을 보내거나 /생성 해주세요."
+            "⚠️ 입력을 처리하다 문제가 생겼어요.\n"
+            f"• 반/날짜: {parsed.get('sheet')} / {parsed.get('date')}\n"
+            f"• 원인: {type(e).__name__}\n"
+            "• '초5 오늘 다 왔어'처럼 간단히 시작해 보시거나, 문장을 조금 바꿔 다시 보내주세요."
         )
         return
-
-    if class_input_blocked(parsed.get("sheet"), parsed.get("date", "")):
-        await update.message.reply_text(
-            f"🛑 '{parsed.get('sheet')}' 반은 종강해서 그 날짜는 입력할 수 없어요."
-        )
-        return
-
-    preview, err = build_preview(target_wb, parsed)
     if err:
         await update.message.reply_text("⚠️ " + err)
         return
