@@ -824,10 +824,22 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
         if student not in roster:
             warnings.append(f"{label}: '{student}' 학생을 못 찾음")
             return
-        cell = ws.cell(r, roster[student])
+        c = roster[student]
+        cell = ws.cell(r, c)
         if isinstance(cell, MergedCell):
-            warnings.append(f"{label}: '{student}' 칸이 병합돼 있어 건너뜀(전출 등)")
-            return
+            rng = next((rr for rr in list(ws.merged_cells.ranges)
+                        if rr.min_row <= r <= rr.max_row and rr.min_col <= c <= rr.max_col), None)
+            # 블록 안에 갇힌 병합(소수인원 반 등)은 풀고 기록.
+            # 전출처럼 여러 블록에 걸친 세로 병합은 그대로 두고 건너뜀.
+            if rng is not None and rng.min_row >= top and rng.max_row <= top + BLOCK_SIZE - 1:
+                try:
+                    ws.unmerge_cells(str(rng))
+                except Exception:
+                    ws.merged_cells.ranges.discard(rng)
+                cell = ws.cell(r, c)
+            else:
+                warnings.append(f"{label}: '{student}' 칸이 병합돼 있어 건너뜀(전출 등)")
+                return
         cell.value = value
         if label == '출석':
             _apply_font_color(cell, _attendance_color(value))
