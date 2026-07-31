@@ -447,12 +447,15 @@ def _strip_diagonal(cell):
 
 
 def _is_holiday_block(ws, top, last_col):
-    """블록에 사각형(여러행×여러열) 병합이 있으면 공휴일/휴강 블록으로 간주."""
+    """블록에 '글자가 있는' 사각형(여러행×여러열) 병합이 있으면 공휴일/휴강 블록으로 간주.
+    빈(None)·'None' 사각형 병합은 휴강이 아니라 정리 대상(소수인원 반 등)."""
     for rng in ws.merged_cells.ranges:
         if (rng.min_row >= top and rng.max_row <= top + BLOCK_SIZE - 1
                 and rng.min_col >= STUDENT_FIRST_COL
                 and rng.max_row > rng.min_row and rng.max_col > rng.min_col):
-            return True
+            anchor = ws.cell(rng.min_row, rng.min_col).value
+            if anchor not in (None, "") and str(anchor).strip().lower() != "none":
+                return True
     return False
 
 
@@ -470,7 +473,11 @@ def normalize_block(ws, top, last_col, groups):
                 and rng.min_col >= STUDENT_FIRST_COL):
             if rng.max_row > rng.min_row and rng.min_col == rng.max_col:
                 vcols.add(rng.min_col)
-            ws.unmerge_cells(str(rng))
+            try:
+                ws.unmerge_cells(str(rng))
+            except (KeyError, ValueError):
+                # openpyxl 내부 _cells 불일치로 실패하면 범위만 강제 제거
+                ws.merged_cells.ranges.discard(rng)
     # 병합 해제된 학생열을 같은 행의 정상 참조열 스타일로 통일
     for r in range(top, top + BLOCK_SIZE):
         ref = next((c for c in range(STUDENT_FIRST_COL, last_col + 1) if c not in vcols), None)
