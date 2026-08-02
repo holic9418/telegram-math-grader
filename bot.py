@@ -2587,16 +2587,24 @@ def generate_weekly_report(target=None):
     """target(기본 오늘)이 속한 주(월~일) 보고서 PDF 생성. 반환: (경로, 반수)|(None,0)."""
     today = target or datetime.datetime.now(KST).date()
     monday, sunday = rpt.week_bounds(today)
-    p = month_path(sunday.year, sunday.month)  # 일요일이 속한 달 파일
-    if not os.path.exists(p):
+    # 주가 월을 넘기면 앞달·뒷달 파일을 모두 읽어 한 주로 합친다.
+    segments, seen = [], set()
+    for d in (monday, sunday):
+        ym = (d.year, d.month)
+        if ym in seen:
+            continue
+        seen.add(ym)
+        p = month_path(d.year, d.month)
+        if os.path.exists(p):
+            segments.append((ac.load_workbook(p), d.year))
+    if not segments:  # 둘 다 없으면 최신 파일로
         f = latest_month_file()
         if not f:
             return None, 0
-        p = os.path.join(DATA_DIR, f)
-    wb = ac.load_workbook(p)
+        segments = [(ac.load_workbook(os.path.join(DATA_DIR, f)), sunday.year)]
     fname = f"{SUBJ_NAME} 주간 출결사항 ({monday.month}.{monday.day}~{sunday.month}.{sunday.day}).pdf"
     out = os.path.join(DATA_DIR, fname)
-    n = rpt.build_report_pdf(wb, out, monday, sunday, sunday.year,
+    n = rpt.build_report_pdf(segments, out, monday, sunday,
                              title=f"<{SUBJ_NAME} 주간 출결사항>", enroll=load_enroll())
     return (out, n) if n else (None, 0)
 

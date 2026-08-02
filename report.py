@@ -182,12 +182,22 @@ def render_student_table(name, ws, dates, scale=2):
     return img
 
 
-def render_class_table(cls_name, ws, dates, scale=2, keep=None):
+def render_class_table(cls_name, ws, dates, scale=2, keep=None, ws_by_date=None):
     """cls_name 반의 dates(예: ['7/7','7/8']) 블록을 표 이미지로 그린다.
     keep: 포함할 학생 이름 집합(None이면 전원). 재적 아닌 학생 제외용.
+    ws_by_date: {날짜: ws} — 주가 월을 넘겨 날짜마다 다른 달 파일에서 읽어야 할 때.
     내용이 칸보다 길면 칸 안에서 줄바꿈하고, 그만큼 행 높이를 늘린다."""
+    def _dws(dt):
+        return (ws_by_date or {}).get(dt, ws)
+    _rcache = {}
+    def _rcol(dt, name):   # 그 날짜가 있는 파일에서 학생의 열 번호(파일마다 다를 수 있어 이름으로 조회)
+        w = _dws(dt)
+        r = _rcache.get(id(w))
+        if r is None:
+            r = ac.get_roster(w); _rcache[id(w)] = r
+        return r.get(name)
     roster = [(n, c) for n, c in ac.get_roster(ws).items()
-              if keep is None or n in keep]  # [(name, col), ...] 열 순서
+              if keep is None or n in keep]  # [(name, col), ...] 열 순서(대표 파일 기준)
     fnt = _font(15 * scale)
     tmp = Image.new("RGB", (10, 10)); md = ImageDraw.Draw(tmp)
 
@@ -201,21 +211,25 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
     merged_min_w = 360 * scale  # 학생 수가 적어도 수업내용이 과하게 접히지 않도록
     date_w = int(max(tw("00/00(월)"), 40 * scale)) + pad * 2
 
-    def block_label(top, k):
+    def block_label(top, k, dt):
         """블록의 실제 B열 라벨(비고→일일test 등 반영). 없으면 기본 LABELS."""
-        v = ws.cell(top + k, 2).value if top else None
+        v = _dws(dt).cell(top + k, 2).value if top else None
         return str(v) if v not in (None, "") else LABELS[k]
 
-    tops = {d: ac.find_date_block(ws, d) for d in dates}
+    tops = {d: ac.find_date_block(_dws(d), d) for d in dates}
 
     # 라벨 열 너비: 기본 라벨 + 이번 주 블록들의 실제 라벨 중 최대
     all_labels = list(LABELS)
     for _d, _t in tops.items():
         if _t:
-            all_labels += [block_label(_t, k) for k in range(5)]
+            all_labels += [block_label(_t, k, _d) for k in range(5)]
     label_w = int(max(tw(l) for l in all_labels)) + pad * 2
-    ws_last_col = ac._last_col(ws, ac._find_start_row(ws))
-    hol_tops = {t for t in tops.values() if t and ac._is_holiday_block(ws, t, ws_last_col)}
+    hol_dates = set()   # 휴강/공휴일 블록인 '날짜'(파일마다 top이 겹칠 수 있어 날짜로 관리)
+    for _d, _t in tops.items():
+        if _t:
+            _w = _dws(_d)
+            if ac._is_holiday_block(_w, _t, ac._last_col(_w, ac._find_start_row(_w))):
+                hol_dates.add(_d)
 
     # 학생 열 너비: 모든 학생을 같은 폭으로 둔다. 기준은 이름과 O/X 같은 짧은 값뿐
     # — 비고처럼 긴 값까지 반영하면 그 학생 열만 넓어져 표가 뒤틀린다(긴 값은 줄바꿈).
@@ -223,11 +237,15 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
     # ('휴강(폭우)' 등) 학생 열이 통째로 그만큼 넓어진다.
     w = max([tw(n) for n, _ in roster] or [0])
     for _d, top in tops.items():
-        if top is None or top in hol_tops:
+        if top is None or _d in hol_dates:
             continue
+        _w = _dws(_d)
         for lab in ('출석', '과제수행'):
-            for _n, col in roster:
-                v = ws.cell(top + ac.ROW_OFFSET[lab], col).value
+            for _n, _col in roster:
+                col = _rcol(_d, _n)
+                if col is None:
+                    continue
+                v = _w.cell(top + ac.ROW_OFFSET[lab], col).value
                 if v is not None:
                     w = max(w, tw(v))
     stu_w = [max(int(w) + pad * 2, 55 * scale)] * len(roster)
@@ -243,29 +261,31 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None):
     blocks = []  # [(날짜, [(라벨텍스트, 라벨, 높이, 병합여부, [(폭, 줄들, 색)])], 휴강텍스트)]
     for dt in dates:
         top = tops[dt]
+        dws = _dws(dt)
         # 공휴일·휴강 블록은 학생 영역 전체가 한 칸으로 병합돼 있다. 값은 왼쪽 위
         # 칸에만 있으므로 학생별로 읽으면 첫 학생 칸에만 찍힌다 — 따로 처리한다.
         hol = None
-        if top in hol_tops:
-            hc = ws.cell(top, ac.STUDENT_FIRST_COL)
+        if dt in hol_dates:
+            hc = dws.cell(top, ac.STUDENT_FIRST_COL)
             hol = (hc.value, _cell_color(hc))
         rows = []
         for k, lab in enumerate(LABELS):
             if hol:
                 cells, n, merged = [], 1, False
             elif lab in ('수업내용', '다음과제'):
-                v = ws.cell(top + ac.ROW_OFFSET[lab], ac.STUDENT_FIRST_COL).value if top else None
+                v = dws.cell(top + ac.ROW_OFFSET[lab], ac.STUDENT_FIRST_COL).value if top else None
                 lines = _wrap(md, v, fnt, merged_w - pad * 2) if v not in (None, '') else []
                 cells, n, merged = [(merged_w, lines, BLACK)], len(lines), True
             else:
                 cells, n, merged = [], 1, False
-                for (name, col), w in zip(roster, stu_w):
-                    c = ws.cell(top + ac.ROW_OFFSET[lab], col) if top else None
+                for (name, _col), w in zip(roster, stu_w):
+                    col = _rcol(dt, name)
+                    c = dws.cell(top + ac.ROW_OFFSET[lab], col) if (top and col) else None
                     v = c.value if c else None
                     lines = _wrap(md, v, fnt, w - pad * 2) if v not in (None, '') else []
                     n = max(n, len(lines))
                     cells.append((w, lines, _cell_color(c) if c else BLACK))
-            rows.append((block_label(top, k), lab, max(row_h, n * line_h + pad), merged, cells))
+            rows.append((block_label(top, k, dt), lab, max(row_h, n * line_h + pad), merged, cells))
         blocks.append((dt, rows, hol))
 
     W = date_w + label_w + merged_w
@@ -366,20 +386,46 @@ def week_dates(ws, monday, sunday, year):
     return out
 
 
-def build_report_pdf(wb, out_path, monday, sunday, year,
+def build_report_pdf(segments, out_path, monday, sunday,
                      title="<수학과 주간 출결사항>", enroll=None):
     """이번 주 각 반 표를 모아 PDF로 저장. 반환: 포함된 반 수(0이면 미생성).
+    segments: [(wb, year), ...] — 한 주가 걸친 달 파일들(월 넘김이면 앞달·뒷달 2개).
+              날짜마다 해당 달 파일에서 읽어 한 주로 합친다.
     enroll: {반: {학생: {'from','to'}}} — 그 주에 재적 아닌 학생은 표에서 제외."""
     enroll = enroll or {}
+    # 반 목록: 파일들에 등장하는 시트 합집합(첫 파일 순서 우선)
+    classes = []
+    for wb, _ in segments:
+        for c in wb.sheetnames:
+            if c not in classes:
+                classes.append(c)
+
+    def _dk(dstr):  # 'M/D' → date (월 넘김 고려: 앞달은 monday年, 뒷달은 sunday年)
+        m, dd = map(int, dstr.split('/'))
+        yy = monday.year if m == monday.month else sunday.year
+        try:
+            return datetime.date(yy, m, dd)
+        except ValueError:
+            return datetime.date(sunday.year, m, dd)
+
     pages = []
-    for cls in wb.sheetnames:
-        dates = week_dates(wb[cls], monday, sunday, year)
-        if not dates:
+    for cls in classes:
+        ws_by_date, primary_ws = {}, None
+        for wb, yr in segments:
+            if cls not in wb.sheetnames:
+                continue
+            ws = wb[cls]
+            if primary_ws is None:
+                primary_ws = ws
+            for d in week_dates(ws, monday, sunday, yr):
+                ws_by_date.setdefault(d, ws)   # 같은 날짜면 먼저 나온 파일 우선
+        if not ws_by_date or primary_ws is None:
             continue
+        dates = sorted(ws_by_date, key=_dk)
         cls_enroll = enroll.get(cls, {})
-        keep = {n for n in ac.get_roster(wb[cls])
-                if ac.is_enrolled_during(cls_enroll.get(n), monday, sunday, year)}
-        tbl = render_class_table(cls, wb[cls], dates, keep=keep)
+        keep = {n for n in ac.get_roster(primary_ws)
+                if ac.is_enrolled_during(cls_enroll.get(n), monday, sunday, sunday.year)}
+        tbl = render_class_table(cls, primary_ws, dates, keep=keep, ws_by_date=ws_by_date)
         head_title = f"{title}   ({monday.month}/{monday.day}~{sunday.month}/{sunday.day})" if not pages else None
         pages.append(render_class_page(cls, tbl, head_title))
     if not pages:
