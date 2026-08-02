@@ -2604,8 +2604,11 @@ def generate_weekly_report(target=None):
         segments = [(ac.load_workbook(os.path.join(DATA_DIR, f)), sunday.year)]
     fname = f"{SUBJ_NAME} 주간 출결사항 ({monday.month}.{monday.day}~{sunday.month}.{sunday.day}).pdf"
     out = os.path.join(DATA_DIR, fname)
+    # 종강한 반은 종강 주 다음부터 보고서에서 제외
+    probe = f"{monday.month}/{monday.day}"
+    skip = {cls for cls in load_closed() if class_input_blocked(cls, probe)}
     n = rpt.build_report_pdf(segments, out, monday, sunday,
-                             title=f"<{SUBJ_NAME} 주간 출결사항>", enroll=load_enroll())
+                             title=f"<{SUBJ_NAME} 주간 출결사항>", enroll=load_enroll(), skip=skip)
     return (out, n) if n else (None, 0)
 
 

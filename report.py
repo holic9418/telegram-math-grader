@@ -387,17 +387,19 @@ def week_dates(ws, monday, sunday, year):
 
 
 def build_report_pdf(segments, out_path, monday, sunday,
-                     title="<수학과 주간 출결사항>", enroll=None):
+                     title="<수학과 주간 출결사항>", enroll=None, skip=None):
     """이번 주 각 반 표를 모아 PDF로 저장. 반환: 포함된 반 수(0이면 미생성).
     segments: [(wb, year), ...] — 한 주가 걸친 달 파일들(월 넘김이면 앞달·뒷달 2개).
               날짜마다 해당 달 파일에서 읽어 한 주로 합친다.
-    enroll: {반: {학생: {'from','to'}}} — 그 주에 재적 아닌 학생은 표에서 제외."""
+    enroll: {반: {학생: {'from','to'}}} — 그 주에 재적 아닌 학생은 표에서 제외.
+    skip: 이 주에 제외할 반 이름 집합(종강한 반 등)."""
     enroll = enroll or {}
+    skip = skip or set()
     # 반 목록: 파일들에 등장하는 시트 합집합(첫 파일 순서 우선)
     classes = []
     for wb, _ in segments:
         for c in wb.sheetnames:
-            if c not in classes:
+            if c not in classes and c not in skip:
                 classes.append(c)
 
     def _dk(dstr):  # 'M/D' → date (월 넘김 고려: 앞달은 monday年, 뒷달은 sunday年)
