@@ -1660,13 +1660,56 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• '설정초기화', '주간보고서' — 관리자만\n"
             "• 승인 관리: 다른 쌤이 처음 쓰려 하면 승인 요청이 와요.\n"
             "   - <b>승인</b> : 대기 목록 보기 / <b>승인 이름</b> 또는 <b>승인 번호</b> : 승인\n"
-            "   - <b>박탈 이름/번호</b> : 사용 권한 회수 / <b>멤버</b> : 승인된 명단",
+            "   - <b>박탈 이름/번호</b> : 사용 권한 회수 / <b>멤버</b> : 승인된 명단\n"
+            "• <b>관리자 넘기기 이름</b> : 관리자 권한을 다른 멤버에게 넘김",
             parse_mode="HTML",
         )
     elif a == chat_id:
         await update.message.reply_text("이미 관리자로 등록돼 있어요. 👍")
     else:
         await update.message.reply_text("이미 다른 분이 관리자로 등록돼 있어요.")
+
+
+async def cmd_transfer_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """관리자: 관리자 권한을 다른 멤버에게 넘긴다. 예) '관리자 넘기기 홍길동'"""
+    if not await require_admin(update):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "누구에게 넘길지 이름이나 번호를 알려주세요. 예) <code>관리자 넘기기 홍길동</code>\n"
+            "(먼저 그분이 봇에 아무 메시지나 보내 '멤버' 목록에 떠 있어야 해요)",
+            parse_mode="HTML")
+        return
+    m = load_members()
+    key = _find_member_key(m, " ".join(context.args))
+    if not key:
+        await update.message.reply_text(
+            "그런 멤버를 못 찾았어요. <code>멤버</code>로 명단을 확인하거나, "
+            "그분이 먼저 봇에 메시지를 보내게 해주세요.", parse_mode="HTML")
+        return
+    new_id = int(key)
+    if new_id == get_admin():
+        await update.message.reply_text("이미 그분이 관리자예요. 👍")
+        return
+    if m[key].get("status") != "approved":     # 넘기는 김에 승인도 처리
+        m[key]["status"] = "approved"
+        save_members(m)
+    set_admin(new_id)
+    name = m[key].get("name") or key
+    env = (os.environ.get("ADMIN_CHAT_ID") or "").strip()
+    warn = ("\n\n⚠️ 단, 지금 Railway에 <code>ADMIN_CHAT_ID</code> 환경변수가 설정돼 있어 그게 우선이에요. "
+            "완전히 넘기려면 그 환경변수를 지우거나 새 관리자 번호로 바꿔주세요.") \
+        if env.lstrip("-").isdigit() else ""
+    await update.message.reply_text(
+        f"✅ 관리자를 <b>{name}</b> 님께 넘겼어요. 이제 이 계정은 일반 멤버예요.{warn}",
+        parse_mode="HTML")
+    try:
+        await context.bot.send_message(
+            new_id, "👑 <b>관리자로 지정됐어요.</b>\n"
+            "이제 승인 관리(<code>승인</code>·<code>박탈</code>·<code>멤버</code>), "
+            "주간보고서, 설정 기능을 쓸 수 있어요.", parse_mode="HTML")
+    except Exception as e:
+        log.warning("새 관리자 알림 실패: %s", e)
 
 
 async def gate_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -2400,6 +2443,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _a is not None:                       # '담당 초5A' = '초5A 담당'
         context.args = _a
         return await cmd_teacher(update, context)
+    _adm_xfer = re.match(r'^관리자\s*(?:넘기기|넘겨\S*|이전|위임|변경|바꾸\S*)\s*(.*)$', low)
+    if _adm_xfer:                              # '관리자 넘기기 홍길동'
+        context.args = _adm_xfer.group(1).split()
+        return await cmd_transfer_admin(update, context)
     if low in ("관리자등록", "관리자", "관리자설정"):
         return await cmd_admin(update, context)
     if kw in ("승인",):
