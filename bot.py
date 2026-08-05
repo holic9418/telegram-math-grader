@@ -135,7 +135,7 @@ def save_wb(wb, path, undoable=False, desc=""):
 _GLUE_WORDS = [
     "수업시간표", "주간시간표", "시간표", "출석부", "미리보기", "실행취소", "되돌리기",
     "방금취소", "요일추가", "주간보고서", "관리자등록", "도움말", "안내문",
-    "신규개강", "신규등록", "공휴일", "휴강",
+    "신규개강", "신규등록", "공휴일", "휴강", "설정백업", "데이터백업",
     "이번주", "저번주", "지난주", "다음주", "이번달", "지난달",
 ]
 _GLUE_RE = [(re.compile(r"\s*".join(map(re.escape, w))), w) for w in _GLUE_WORDS]
@@ -1881,8 +1881,25 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await gate_member(update, context):
         return
     doc = update.message.document
-    if not doc.file_name.lower().endswith(".xlsx"):
-        await update.message.reply_text("xlsx 파일만 저장할 수 있어요.")
+    fn = doc.file_name or ""
+    if fn.lower().endswith(".json"):        # 설정 복원 (관리자만)
+        if not await require_admin(update):
+            return
+        safe = os.path.basename(fn)
+        tgfile = await doc.get_file()
+        raw = bytes(await tgfile.download_as_bytearray())
+        try:
+            json.loads(raw.decode("utf-8"))     # 유효성 확인
+        except Exception as e:
+            await update.message.reply_text(f"설정 파일이 올바른 JSON이 아니에요: {e}")
+            return
+        with open(os.path.join(DATA_DIR, safe), "wb") as f:
+            f.write(raw)
+        await update.message.reply_text(
+            f"✅ 설정 복원: <b>{safe}</b>", parse_mode="HTML")
+        return
+    if not fn.lower().endswith(".xlsx"):
+        await update.message.reply_text("xlsx 또는 설정(.json) 파일만 저장할 수 있어요.")
         return
     tgfile = await doc.get_file()
     data = bytes(await tgfile.download_as_bytearray())
@@ -1903,6 +1920,33 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ 저장했어요: {fname}\n이제 출석을 자유롭게 입력하시면 됩니다."
     )
+
+
+async def cmd_backup_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """관리자: 봇 설정(등록기간·담당·멤버·진도 등 .json)을 파일로 내려보낸다.
+    다른 봇/기기로 옮기거나 백업할 때 받아서 그대로 업로드하면 복원됨."""
+    if not await require_admin(update):
+        return
+    try:
+        files = sorted(f for f in os.listdir(DATA_DIR)
+                       if f.endswith(".json") and os.path.isfile(os.path.join(DATA_DIR, f)))
+    except FileNotFoundError:
+        files = []
+    if not files:
+        await update.message.reply_text("백업할 설정 파일이 없어요.")
+        return
+    sent = 0
+    for fn in files:
+        try:
+            with open(os.path.join(DATA_DIR, fn), "rb") as f:
+                await update.message.reply_document(document=f, filename=fn)
+            sent += 1
+        except Exception as e:
+            log.warning("설정백업 전송 실패 %s: %s", fn, e)
+    await update.message.reply_text(
+        f"📦 설정 {sent}개 백업 완료.\n"
+        "옮길 봇에서 <b>관리자 등록</b> 후 이 파일들을 그대로 올리면 복원돼요.",
+        parse_mode="HTML")
 
 
 # ── 신규개강 / 종강 (반 단위) ──────────────────────────────────
@@ -2467,6 +2511,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_stats(update, context)
     if low in ("설정초기화", "기본설정복원", "반목록갱신"):
         return await cmd_reset_config(update, context)
+    if low in ("설정백업", "설정내보내기", "데이터백업", "백업받기"):
+        return await cmd_backup_config(update, context)
     if low in ("주간보고서", "보고서", "주간출결"):
         return await cmd_report(update, context)
     # ── 분반 이동: '중3 임건 2반으로' / '중3 임건 정승민 A반으로' ──
