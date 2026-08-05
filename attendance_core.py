@@ -177,8 +177,25 @@ def _class_groups(ws, start, last_col):
 
 
 def _gkey(s):
-    """반 그룹 키 정규화: 'CLASS A' / 'A반' / ' a ' → 'A'."""
+    """반 그룹 키 정규화: 'CLASS A' / 'A반' / ' a ' → 'A', '1반' → '1'."""
     return re.sub(r'CLASS|반|\s', '', str(s or '').upper())
+
+
+def _group_index(key, groups):
+    """사용자가 부른 그룹 이름(A/B, 1반/2반, CLASS A…)을 groups 리스트의 인덱스로."""
+    gk = _gkey(key)
+    if not gk:
+        return None
+    if gk.isdigit():                       # '1반'/'2반' → 위치 순서
+        n = int(gk) - 1
+        return n if 0 <= n < len(groups) else None
+    for i, (lbl, _c0, _c1) in enumerate(groups):   # 라벨(CLASS A) 매칭
+        if lbl and _gkey(lbl) == gk:
+            return i
+    if len(gk) == 1 and gk.isalpha():      # 라벨이 없어도 A/B → 위치 순서
+        n = ord(gk) - ord('A')
+        return n if 0 <= n < len(groups) else None
+    return None
 
 
 def _capture_template(ws, start, last_col):
@@ -951,11 +968,11 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
                 cdefault = vn.pop(dk)
                 break
         groups = _class_groups(ws, STUDENT_FIRST_COL, last_stu)
-        gval = {}   # 정규화 그룹키 -> 값
+        gvals = [None] * len(groups)   # 그룹 인덱스 -> 값 (A/1반=0, B/2반=1…)
         for k in list(vn.keys()):
-            gk = _gkey(k)
-            if gk and any(gk == _gkey(lbl) for lbl, _, _ in groups if lbl):
-                gval[gk] = vn.pop(k)
+            gi = _group_index(k, groups)
+            if gi is not None:
+                gvals[gi] = vn.pop(k)
         _unmerge_hrow(rc)
         for st, col in roster.items():
             cell = ws.cell(rc, col)
@@ -963,13 +980,17 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
                 continue
             val = vn.get(st)                      # 학생명 지정 최우선
             if val in (None, ''):
-                gl = next((lbl for lbl, c0, c1 in groups if c0 <= col <= c1), None)
-                val = gval.get(_gkey(gl)) if gl else None
+                gi = next((i for i, (lbl, c0, c1) in enumerate(groups)
+                           if c0 <= col <= c1), None)
+                val = gvals[gi] if gi is not None else None
             if val in (None, ''):
                 val = cdefault
             cell.value = val if val not in (None, '') else None
         _merge_runs(rc)
-        shown = ", ".join(f"{k}={x}" for k, x in list(gval.items()) + list(vn.items()))[:120]
+        parts_shown = [f"{(groups[i][0] or str(i+1)+'반')}={x}"
+                       for i, x in enumerate(gvals) if x] + \
+                      [f"{s}={x}" for s, x in vn.items()]
+        shown = ", ".join(parts_shown)[:120]
         written.append(f"수업내용(분리) = {shown}" + (f" / 나머지={cdefault}" if cdefault else ""))
 
     # 다음과제: 문자열(반 전체) 또는 {학생: 값, '나머지': 기본}. 결석생은 빗금(제외).
