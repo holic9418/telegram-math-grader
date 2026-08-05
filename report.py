@@ -273,9 +273,25 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None, ws_by_date=None)
             if hol:
                 cells, n, merged = [], 1, False
             elif lab in ('수업내용', '다음과제'):
-                v = dws.cell(top + ac.ROW_OFFSET[lab], ac.STUDENT_FIRST_COL).value if top else None
-                lines = _wrap(md, v, fnt, merged_w - pad * 2) if v not in (None, '') else []
-                cells, n, merged = [(merged_w, lines, BLACK)], len(lines), True
+                r = (top + ac.ROW_OFFSET[lab]) if top else None
+                c0 = ac.STUDENT_FIRST_COL
+                # 학생 영역이 가로 병합돼 있으면 반 전체 공통, 아니면 학생별 개별(다음과제 개별 입력)
+                indiv = bool(r) and not any(
+                    rng.min_row <= r <= rng.max_row and rng.min_col <= c0 and rng.max_col > c0
+                    for rng in dws.merged_cells.ranges)
+                if indiv:
+                    cells, n, merged = [], 1, False
+                    for (name, _col), w in zip(roster, stu_w):
+                        col = _rcol(dt, name)
+                        c = dws.cell(r, col) if col else None
+                        vv = c.value if c else None
+                        lines = _wrap(md, vv, fnt, w - pad * 2) if vv not in (None, '') else []
+                        n = max(n, len(lines))
+                        cells.append((w, lines, _cell_color(c) if c else BLACK))
+                else:
+                    v = dws.cell(r, c0).value if r else None
+                    lines = _wrap(md, v, fnt, merged_w - pad * 2) if v not in (None, '') else []
+                    cells, n, merged = [(merged_w, lines, BLACK)], len(lines), True
             else:
                 cells, n, merged = [], 1, False
                 for (name, _col), w in zip(roster, stu_w):

@@ -873,12 +873,42 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
             _write_value(ws, r, STUDENT_FIRST_COL, block)
             written.append(f"{label} = {block}")
 
-    for label in ('수업내용', '다음과제'):
-        val = data.get(label)
-        if isinstance(val, str) and val.strip():
-            r = top + ROW_OFFSET[label]
-            _write_value(ws, r, STUDENT_FIRST_COL, val)  # 병합돼 있으면 풀고 씀
-            written.append(f"{label} = {val}")
+    # 수업내용: 항상 반 전체 하나
+    v = data.get('수업내용')
+    if isinstance(v, str) and v.strip():
+        _write_value(ws, top + ROW_OFFSET['수업내용'], STUDENT_FIRST_COL, v)
+        written.append(f"수업내용 = {v}")
+
+    # 다음과제: 문자열(반 전체) 또는 {학생: 값, '나머지': 기본}(개별)
+    nq = data.get('다음과제')
+    rq = top + ROW_OFFSET['다음과제']
+    if isinstance(nq, str) and nq.strip():
+        _write_value(ws, rq, STUDENT_FIRST_COL, nq)
+        written.append(f"다음과제 = {nq}")
+    elif isinstance(nq, dict) and nq:
+        nqn = _norm_keys(nq)
+        default = None
+        for dk in ('나머지', '그외', '그 외', '기타', '전체', '기본', '_default'):
+            if dk in nqn:
+                default = nqn.pop(dk)
+                break
+        # 개별로 쓰려면 다음과제 행의 병합을 먼저 푼다
+        for rng in list(ws.merged_cells.ranges):
+            if rng.min_row <= rq <= rng.max_row and rng.min_col <= STUDENT_FIRST_COL <= rng.max_col:
+                try:
+                    ws.unmerge_cells(str(rng))
+                except (KeyError, ValueError):
+                    ws.merged_cells.ranges.discard(rng)
+        cnt = 0
+        for st, col in roster.items():
+            val = nqn.get(st, default)
+            if val in (None, ''):
+                continue
+            _write_value(ws, rq, col, val)
+            cnt += 1
+        if cnt:
+            shown = ", ".join(f"{s}={x}" for s, x in list(nqn.items())[:4])
+            written.append(f"다음과제(개별) = {shown}" + (f" / 나머지={default}" if default else ""))
 
     # 비고 행 라벨 변경 (일일테스트 등) — B열 라벨만 이 블록에서 교체
     new_label = data.get('비고라벨') or data.get('비고제목')
