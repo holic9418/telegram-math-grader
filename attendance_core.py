@@ -162,6 +162,25 @@ def _detect_groups(ws, start, last_col):
     return [(STUDENT_FIRST_COL, last_col)]
 
 
+def _class_groups(ws, start, last_col):
+    """[(라벨, 시작열, 끝열)] — CLASS 헤더 병합의 글자까지 함께. 없으면 [(None, ...)]."""
+    out = []
+    for rng in ws.merged_cells.ranges:
+        if rng.max_row < start and rng.min_col >= STUDENT_FIRST_COL and rng.max_col > rng.min_col:
+            lbl = ws.cell(rng.min_row, rng.min_col).value
+            out.append((str(lbl).strip() if lbl not in (None, '') else None,
+                        rng.min_col, min(rng.max_col, last_col)))
+    if out:
+        out.sort(key=lambda t: t[1])
+        return out
+    return [(None, STUDENT_FIRST_COL, last_col)]
+
+
+def _gkey(s):
+    """반 그룹 키 정규화: 'CLASS A' / 'A반' / ' a ' → 'A'."""
+    return re.sub(r'CLASS|반|\s', '', str(s or '').upper())
+
+
 def _capture_template(ws, start, last_col):
     """첫 블록의 셀 스타일/행높이만 캡처 (병합은 재구성)."""
     styles, heights = [], []
@@ -884,17 +903,38 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
             _write_value(ws, r, STUDENT_FIRST_COL, block)
             written.append(f"{label} = {block}")
 
-    # 수업내용: 반 전체 하나. 헤더에 CLASS 그룹이 있어도 학생영역 전체를 한 칸으로 병합.
+    # 수업내용: 문자열(반 전체) 또는 {'A':..,'B':..,'나머지':..}/{학생:..} 분리 입력.
     v = data.get('수업내용')
-    if isinstance(v, str) and v.strip():
-        rc = top + ROW_OFFSET['수업내용']
-        last_stu = max(roster.values()) if roster else last_col
-        for rng in list(ws.merged_cells.ranges):   # 수업내용 행의 그룹병합 모두 해제
-            if rng.min_row == rng.max_row == rc and rng.max_col >= STUDENT_FIRST_COL:
+    rc = top + ROW_OFFSET['수업내용']
+    last_stu = max(roster.values()) if roster else last_col
+
+    def _unmerge_hrow(r):   # 그 행의 가로 병합(그룹병합 포함) 모두 해제
+        for rng in list(ws.merged_cells.ranges):
+            if rng.min_row == rng.max_row == r and rng.max_col >= STUDENT_FIRST_COL:
                 try:
                     ws.unmerge_cells(str(rng))
                 except (KeyError, ValueError):
                     ws.merged_cells.ranges.discard(rng)
+
+    def _merge_runs(r):     # 같은 값이 좌우로 이어지면 한 칸으로 병합
+        scols = sorted(roster.values())
+        i3 = 0
+        while i3 < len(scols):
+            v0 = ws.cell(r, scols[i3]).value
+            j3 = i3
+            while (j3 + 1 < len(scols) and scols[j3 + 1] == scols[j3] + 1
+                   and ws.cell(r, scols[j3 + 1]).value == v0):
+                j3 += 1
+            if j3 > i3 and v0 not in (None, ''):
+                try:
+                    ws.merge_cells(start_row=r, start_column=scols[i3],
+                                   end_row=r, end_column=scols[j3])
+                except Exception:
+                    pass
+            i3 = j3 + 1
+
+    if isinstance(v, str) and v.strip():
+        _unmerge_hrow(rc)
         ws.cell(rc, STUDENT_FIRST_COL).value = v
         if last_stu > STUDENT_FIRST_COL:
             try:
@@ -903,6 +943,34 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
             except Exception:
                 pass
         written.append(f"수업내용 = {v}")
+    elif isinstance(v, dict) and v:
+        vn = _norm_keys(v)
+        cdefault = None
+        for dk in ('나머지', '그외', '그 외', '기타', '전체', '기본', '공통', '_default'):
+            if dk in vn:
+                cdefault = vn.pop(dk)
+                break
+        groups = _class_groups(ws, STUDENT_FIRST_COL, last_stu)
+        gval = {}   # 정규화 그룹키 -> 값
+        for k in list(vn.keys()):
+            gk = _gkey(k)
+            if gk and any(gk == _gkey(lbl) for lbl, _, _ in groups if lbl):
+                gval[gk] = vn.pop(k)
+        _unmerge_hrow(rc)
+        for st, col in roster.items():
+            cell = ws.cell(rc, col)
+            if isinstance(cell, MergedCell):
+                continue
+            val = vn.get(st)                      # 학생명 지정 최우선
+            if val in (None, ''):
+                gl = next((lbl for lbl, c0, c1 in groups if c0 <= col <= c1), None)
+                val = gval.get(_gkey(gl)) if gl else None
+            if val in (None, ''):
+                val = cdefault
+            cell.value = val if val not in (None, '') else None
+        _merge_runs(rc)
+        shown = ", ".join(f"{k}={x}" for k, x in list(gval.items()) + list(vn.items()))[:120]
+        written.append(f"수업내용(분리) = {shown}" + (f" / 나머지={cdefault}" if cdefault else ""))
 
     # 다음과제: 문자열(반 전체) 또는 {학생: 값, '나머지': 기본}. 결석생은 빗금(제외).
     nq = data.get('다음과제')
