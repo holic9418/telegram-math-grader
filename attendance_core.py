@@ -890,34 +890,43 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
         _write_value(ws, top + ROW_OFFSET['수업내용'], STUDENT_FIRST_COL, v)
         written.append(f"수업내용 = {v}")
 
-    # 다음과제: 문자열(반 전체) 또는 {학생: 값, '나머지': 기본}(개별)
+    # 다음과제: 문자열(반 전체) 또는 {학생: 값, '나머지': 기본}. 결석생은 빗금(제외).
     nq = data.get('다음과제')
     rq = top + ROW_OFFSET['다음과제']
-    if isinstance(nq, str) and nq.strip():
-        _write_value(ws, rq, STUDENT_FIRST_COL, nq)
-        written.append(f"다음과제 = {nq}")
-    elif isinstance(nq, dict) and nq:
+    default = None
+    nqn = {}
+    if isinstance(nq, dict):
         nqn = _norm_keys(nq)
-        default = None
         for dk in ('나머지', '그외', '그 외', '기타', '전체', '기본', '_default'):
             if dk in nqn:
                 default = nqn.pop(dk)
                 break
-        # 개별로 쓰려면 다음과제 행의 병합을 먼저 푼다
+    elif isinstance(nq, str) and nq.strip():
+        default = nq
+    if nqn or default is not None or absent:   # 값 지정 or 결석생 있으면 학생별 처리
+        # 다음과제 '행'의 가로 병합을 모두 푼다(그룹병합 포함). 세로(열) 병합은 건드리지 않음.
         for rng in list(ws.merged_cells.ranges):
-            if rng.min_row <= rq <= rng.max_row and rng.min_col <= STUDENT_FIRST_COL <= rng.max_col:
+            if rng.min_row == rng.max_row == rq and rng.max_col >= STUDENT_FIRST_COL:
                 try:
                     ws.unmerge_cells(str(rng))
                 except (KeyError, ValueError):
                     ws.merged_cells.ranges.discard(rng)
         cnt = 0
         for st, col in roster.items():
-            val = nqn.get(st, default)
-            if val in (None, ''):
+            cell = ws.cell(rq, col)
+            if isinstance(cell, MergedCell):
                 continue
-            _write_value(ws, rq, col, val)
-            cnt += 1
-        # 같은 숙제가 좌우로 이어지면 병합해 반복 표기를 없앤다(끊기면 따로 둔다)
+            if st in absent:                    # 결석생: 다음과제 칸 빗금
+                cell.value = None
+                _apply_font_color(cell, COLOR_BLACK)
+                _set_diagonal(cell)
+                continue
+            _strip_diagonal(cell)               # 출석생: 재입력 대비 빗금 제거
+            val = nqn.get(st, default)
+            if val not in (None, ''):
+                cell.value = val
+                cnt += 1
+        # 같은 숙제가 좌우로 이어지면 병합(결석 빗금·빈칸은 자연히 끊김)
         scols = sorted(roster.values())
         i2 = 0
         while i2 < len(scols):
@@ -933,9 +942,11 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
                 except Exception:
                     pass
             i2 = j2 + 1
-        if cnt:
+        if nqn:
             shown = ", ".join(f"{s}={x}" for s, x in list(nqn.items())[:4])
             written.append(f"다음과제(개별) = {shown}" + (f" / 나머지={default}" if default else ""))
+        elif default is not None:
+            written.append(f"다음과제 = {default}")
 
     # 비고 행 라벨 변경 (일일테스트 등) — B열 라벨만 이 블록에서 교체
     new_label = data.get('비고라벨') or data.get('비고제목')

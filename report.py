@@ -57,6 +57,18 @@ def _cell_color(cell):
     return BLACK
 
 
+def _has_diag(cell):
+    """셀에 대각선(빗금) 테두리가 있으면 True — 결석생 과제/다음과제 칸 표시용."""
+    if cell is None:
+        return False
+    try:
+        b = cell.border
+        return bool((b.diagonal and getattr(b.diagonal, 'style', None))
+                    or b.diagonalDown or b.diagonalUp)
+    except Exception:
+        return False
+
+
 def _wrap(md, s, font, max_w):
     """max_w(px) 안에 들어가도록 줄을 나눈다.
     공백에서 먼저 끊고, 한 낱말이 그보다 길면 글자 단위로 끊는다."""
@@ -302,7 +314,7 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None, ws_by_date=None)
                             span_w += pairs[j2][1]; j2 += 1
                         lines = _wrap(md, v, fnt, span_w - pad * 2) if v not in (None, '') else []
                         n = max(n, len(lines))
-                        cells.append((span_w, lines, _cell_color(cc) if cc else BLACK))
+                        cells.append((span_w, lines, _cell_color(cc) if cc else BLACK, _has_diag(cc)))
                         i2 = j2
                 else:
                     v = dws.cell(r, c0).value if r else None
@@ -316,12 +328,7 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None, ws_by_date=None)
                     v = c.value if c else None
                     lines = _wrap(md, v, fnt, w - pad * 2) if v not in (None, '') else []
                     n = max(n, len(lines))
-                    diag = False   # 결석생 과제칸 등 빗금 셀
-                    if c is not None:
-                        bd = c.border
-                        diag = bool((bd.diagonal and getattr(bd.diagonal, 'style', None))
-                                    or bd.diagonalDown or bd.diagonalUp)
-                    cells.append((w, lines, _cell_color(c) if c else BLACK, diag))
+                    cells.append((w, lines, _cell_color(c) if c else BLACK, _has_diag(c)))
             rows.append((block_label(top, k, dt), lab, max(row_h, n * line_h + pad), merged, cells))
         blocks.append((dt, rows, hol))
 
