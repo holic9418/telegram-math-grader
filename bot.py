@@ -804,6 +804,7 @@ GUIDE = f"""📋 <b>{SUBJ_NAME} 출석부 봇 사용법</b>
    ※ 학생 한 명은 <b>신규등록</b> · <b>퇴원</b> 으로
 • <b>점검</b>: 이상한 날짜(중복·다른 달) 확인·정리
 • <b>날짜 변경</b>: <code>고1 7/21 → 7/22</code> (그 칸의 기록은 그대로, 날짜만 바뀜)
+• <b>분반 이동</b>: <code>중3 임건 2반으로</code> (CLASS A/B=1반/2반 사이 이동, 지난 기록 그대로 따라감)
 • <b>실행취소</b>: <u>방금 입력을 잘못했을 때</u> 직전 상태로 되돌리기 (매 입력 전 자동 백업)
 • <b>통계</b>: 출석률·결석·과제 미제출 집계
    → <code>통계</code>(전체) · <code>통계 초5A</code> · <code>통계 이번주</code> · <code>통계 지난달</code>
@@ -1299,6 +1300,64 @@ async def cmd_change_date(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         "그 날짜 칸의 출석·숙제 기록은 그대로 유지돼요.\n"
         f"확인: <code>{sheet} {new} 미리보기</code> · 되돌리기: <code>실행취소</code>",
         parse_mode="HTML")
+
+
+async def cmd_move_group(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
+    """학생을 다른 CLASS 그룹(1반/2반, A반/B반)으로 이동. 예) '중3 임건 2반으로'"""
+    latest, path = load_latest_wb()
+    if latest is None:
+        await update.message.reply_text("아직 출석부 파일이 없어요.")
+        return
+    cands = _match_preview_sheet(text, latest.sheetnames)
+    if not cands:
+        await update.message.reply_text("어느 반인지 알려주세요. 예) 중3 임건 2반으로")
+        return
+    if len(cands) > 1:
+        await update.message.reply_text("어느 반인지 콕 집어주세요: " + ", ".join(cands))
+        return
+    sheet = cands[0]
+    ws = latest[sheet]
+    m_num = re.search(r'(\d+)\s*반', text)
+    m_let = re.search(r'(?:class\s*)?([abAB])\s*반', text)
+    if m_num:
+        target_idx = int(m_num.group(1)) - 1
+    elif m_let:
+        target_idx = ord(m_let.group(1).upper()) - ord('A')
+    else:
+        await update.message.reply_text("어느 반으로 옮길지 알려주세요. 예) 중3 임건 2반으로")
+        return
+    roster = ac.get_roster(ws)
+    tnorm = ac.nfc(text)
+    names = [n for n in roster if n in tnorm]
+    if not names:
+        await update.message.reply_text(
+            f"옮길 학생 이름을 못 찾았어요.\n'{sheet}' 명단: " + ", ".join(roster.keys()))
+        return
+    try:
+        moved, lbl = ac.move_student_group(latest, sheet, names, target_idx)
+    except ValueError as e:
+        await update.message.reply_text(f"이동하지 못했어요: {e}")
+        return
+    save_wb(latest, path, undoable=True, desc=f"{sheet} 분반이동 {'·'.join(moved)}→{lbl}")
+    await update.message.reply_text(
+        f"✅ <b>{sheet}</b> · {', '.join(moved)} → <b>{lbl}</b> 로 옮겼어요.\n"
+        "지난 기록(출석·수업·과제)은 그대로 따라갔어요.\n"
+        f"확인: <code>{sheet} 미리보기</code> · 되돌리기: <code>실행취소</code>",
+        parse_mode="HTML")
+    # 최근 날짜 한 칸 사진으로 확인
+    try:
+        ws2 = latest[sheet]
+        st = ac._find_start_row(ws2); lc = ac._last_col(ws2, st); last = None
+        for r in range(st, ws2.max_row + 1, ac.BLOCK_SIZE):
+            mm = re.search(r'(\d{1,2})\s*[/.월]\s*(\d{1,2})', str(ws2.cell(r, 1).value or ''))
+            if mm and ac.block_has_data(ws2, r, lc):
+                last = f"{int(mm.group(1))}/{int(mm.group(2))}"
+        if last:
+            img = rpt.render_class_table(sheet, ws2, [last])
+            bio = io.BytesIO(); img.save(bio, "PNG"); bio.seek(0)
+            await update.message.reply_photo(photo=bio, caption=f"📷 {sheet} · {last} (이동 후)")
+    except Exception as e:
+        log.warning("분반이동 사진 전송 실패: %s", e)
 
 
 # ── 진도표 ──────────────────────────────────────────────────────
@@ -2363,6 +2422,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_reset_config(update, context)
     if low in ("주간보고서", "보고서", "주간출결"):
         return await cmd_report(update, context)
+    # ── 분반 이동: '중3 임건 2반으로' / '중3 임건 정승민 A반으로' ──
+    _move_trig = (
+        re.search(r'(?:\d+|class\s*[ab]|[ab])\s*반\s*(?:으?로|에)\s*'
+                  r'(?:옮[겨기]\S*|보내\S*|이동\S*|편성\S*|해\S*)?\s*$', low)
+        or ("분반" in low and any(k in low for k in ("변경", "이동", "옮")))
+    )
+    if (re.match(r'^\s*(초|중|고)\d', low) and not _attend_signal and _move_trig
+            and not any(k in low for k in ("수업", "숙제", "과제", "진도", "통계",
+                                           "알림", "일정", "보고서", "미리보기", "날짜"))):
+        return await cmd_move_group(update, context, text)
     # ── 날짜 변경: '고1 7/21 → 7/22' / '고1 7/21일 날짜 7/22로 변경' ──
     _dtoks = re.findall(r'\d{1,2}\s*[/.월]\s*\d{1,2}', text)
     if len(_dtoks) >= 2 and (

@@ -796,6 +796,145 @@ def rebuild_without_students(wb, sheet, drop_names):
     wb.move_sheet(sheet, offset=idx - wb.sheetnames.index(sheet))
 
 
+def _merge_equal_runs(ws, r, scols):
+    """행 r에서 학생열 scols(정렬)의 값이 좌우로 이어지면 한 칸으로 병합."""
+    scols = sorted(scols)
+    i = 0
+    while i < len(scols):
+        v0 = ws.cell(r, scols[i]).value
+        j = i
+        while (j + 1 < len(scols) and scols[j + 1] == scols[j] + 1
+               and ws.cell(r, scols[j + 1]).value == v0):
+            j += 1
+        if j > i and v0 not in (None, ''):
+            try:
+                ws.merge_cells(start_row=r, start_column=scols[i],
+                               end_row=r, end_column=scols[j])
+            except Exception:
+                pass
+        i = j + 1
+
+
+def move_student_group(wb, sheet, names, target_idx):
+    """names 학생들을 target_idx 번째 CLASS 그룹으로 옮긴다(0=1반/A, 1=2반/B…).
+    모든 날짜의 기록(값·서식)은 유지하고 열 순서만 재배치하며 CLASS 헤더를 다시 그린다.
+    반환: (moved_names, 그룹라벨). 분반이 없거나 학생이 없으면 ValueError."""
+    from openpyxl.utils import get_column_letter
+    ws = wb[sheet]
+    start = _find_start_row(ws)
+    last_col = _last_col(ws, start)
+    roster = get_roster(ws)                       # name(nfc) -> col
+    names = [nfc(n) for n in names]
+    missing = [n for n in names if n not in roster]
+    if missing:
+        raise ValueError("명단에 없는 학생: " + ", ".join(missing))
+    hmerges = [rng for rng in ws.merged_cells.ranges
+               if rng.max_row < start and rng.min_col >= STUDENT_FIRST_COL
+               and rng.max_col > rng.min_col]
+    if len(hmerges) < 2:
+        raise ValueError("이 반은 분반(CLASS A/B) 구분이 없습니다.")
+    crow = min(r.min_row for r in hmerges)
+    groups = _class_groups(ws, STUDENT_FIRST_COL, last_col)   # [(label,c0,c1)]
+    labels = [g[0] for g in groups]
+    if not (0 <= target_idx < len(groups)):
+        raise ValueError("반 번호가 범위를 벗어났습니다.")
+
+    # 현재 그룹별 멤버(열 순서)
+    ordered = sorted(roster.items(), key=lambda x: x[1])
+    def gof(col):
+        for i, (l, c0, c1) in enumerate(groups):
+            if c0 <= col <= c1:
+                return i
+        return len(groups) - 1
+    gmembers = [[] for _ in groups]
+    for nm, col in ordered:
+        gmembers[gof(col)].append(nm)
+    if all(nm in gmembers[target_idx] for nm in names):
+        raise ValueError("이미 그 반에 있습니다.")
+    for g in gmembers:
+        for n in names:
+            if n in g:
+                g.remove(n)
+    gmembers[target_idx].extend(names)
+    new_order = [nm for g in gmembers for nm in g]
+
+    colmap = {1: 1, 2: 2}                          # old col -> new col
+    for i, nm in enumerate(new_order):
+        colmap[roster[nm]] = STUDENT_FIRST_COL + i
+
+    # 새 그룹 열범위
+    sizes = [len(g) for g in gmembers]
+    ranges, c = [], STUDENT_FIRST_COL
+    for sz in sizes:
+        ranges.append((c, c + sz - 1) if sz > 0 else None)
+        c += sz
+
+    # 재구성 전: 블록 안 '가로 1행' 병합(수업내용/다음과제) 값을 각 칸에 펼친다
+    for rng in list(ws.merged_cells.ranges):
+        if (rng.min_row == rng.max_row >= start and rng.min_col >= STUDENT_FIRST_COL
+                and rng.max_col > rng.min_col):
+            val = ws.cell(rng.min_row, rng.min_col).value
+            try:
+                ws.unmerge_cells(str(rng))
+            except (KeyError, ValueError):
+                ws.merged_cells.ranges.discard(rng)
+            for cc in range(rng.min_col, rng.max_col + 1):
+                ws.cell(rng.min_row, cc).value = val
+
+    idx = wb.sheetnames.index(sheet)
+    dest = wb.create_sheet(sheet + "__tmp")
+    max_row = ws.max_row
+    for sc, dc in colmap.items():
+        for r in range(1, max_row + 1):
+            s = ws.cell(r, sc)
+            dest.cell(r, dc).value = s.value
+            if s.has_style:
+                dest.cell(r, dc)._style = copy(s._style)
+        sl, dl = get_column_letter(sc), get_column_letter(dc)
+        if sl in ws.column_dimensions and ws.column_dimensions[sl].width:
+            dest.column_dimensions[dl].width = ws.column_dimensions[sl].width
+    for r in range(1, max_row + 1):
+        if r in ws.row_dimensions and ws.row_dimensions[r].height is not None:
+            dest.row_dimensions[r].height = ws.row_dimensions[r].height
+    for rng in list(ws.merged_cells.ranges):
+        # 가로 1행 학생영역 병합(CLASS 헤더 등)은 건너뜀 — 아래서 다시 그림
+        if (rng.min_row == rng.max_row and rng.min_col >= STUDENT_FIRST_COL
+                and rng.max_col > rng.min_col):
+            continue
+        kept = [colmap[cc] for cc in range(rng.min_col, rng.max_col + 1) if cc in colmap]
+        if not kept:
+            continue
+        r0, r1, c0, c1 = rng.min_row, rng.max_row, min(kept), max(kept)
+        if r1 > r0 or c1 > c0:
+            dest.merge_cells(start_row=r0, start_column=c0, end_row=r1, end_column=c1)
+            dest.cell(r0, c0).value = ws.cell(rng.min_row, rng.min_col).value  # 공휴일 등 앵커값 유지
+    del wb[sheet]
+    dest.title = sheet
+    wb.move_sheet(sheet, offset=idx - wb.sheetnames.index(sheet))
+    ws = wb[sheet]
+
+    # CLASS 헤더 다시 그림
+    for cc in range(STUDENT_FIRST_COL, last_col + 1):
+        ws.cell(crow, cc).value = None
+    for i, rg in enumerate(ranges):
+        if not rg:
+            continue
+        c0, c1 = rg
+        ws.cell(crow, c0).value = labels[i]
+        if c1 > c0:
+            try:
+                ws.merge_cells(start_row=crow, start_column=c0, end_row=crow, end_column=c1)
+            except Exception:
+                pass
+
+    # 각 날짜 블록의 수업내용·다음과제를 값 기준으로 다시 병합
+    scols = list(range(STUDENT_FIRST_COL, STUDENT_FIRST_COL + len(new_order)))
+    for r0 in range(start, max_row + 1, BLOCK_SIZE):
+        for rel in (ROW_OFFSET['수업내용'], ROW_OFFSET['다음과제']):
+            _merge_equal_runs(ws, r0 + rel, scols)
+    return names, (labels[target_idx] or f"{target_idx + 1}반")
+
+
 def _write_value(ws, r, c, val):
     """(r,c) 셀에 값을 쓴다. 병합된 셀(읽기 전용)이면 그 병합을 먼저 풀고 쓴다.
     소수 인원 반처럼 블록 전체가 한 칸으로 병합된 경우에도 안전하게 기록."""
