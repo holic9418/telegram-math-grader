@@ -884,10 +884,24 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
             _write_value(ws, r, STUDENT_FIRST_COL, block)
             written.append(f"{label} = {block}")
 
-    # 수업내용: 항상 반 전체 하나
+    # 수업내용: 반 전체 하나. 헤더에 CLASS 그룹이 있어도 학생영역 전체를 한 칸으로 병합.
     v = data.get('수업내용')
     if isinstance(v, str) and v.strip():
-        _write_value(ws, top + ROW_OFFSET['수업내용'], STUDENT_FIRST_COL, v)
+        rc = top + ROW_OFFSET['수업내용']
+        last_stu = max(roster.values()) if roster else last_col
+        for rng in list(ws.merged_cells.ranges):   # 수업내용 행의 그룹병합 모두 해제
+            if rng.min_row == rng.max_row == rc and rng.max_col >= STUDENT_FIRST_COL:
+                try:
+                    ws.unmerge_cells(str(rng))
+                except (KeyError, ValueError):
+                    ws.merged_cells.ranges.discard(rng)
+        ws.cell(rc, STUDENT_FIRST_COL).value = v
+        if last_stu > STUDENT_FIRST_COL:
+            try:
+                ws.merge_cells(start_row=rc, start_column=STUDENT_FIRST_COL,
+                               end_row=rc, end_column=last_stu)
+            except Exception:
+                pass
         written.append(f"수업내용 = {v}")
 
     # 다음과제: 문자열(반 전체) 또는 {학생: 값, '나머지': 기본}. 결석생은 빗금(제외).
