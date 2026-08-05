@@ -815,54 +815,32 @@ def _merge_equal_runs(ws, r, scols):
         i = j + 1
 
 
-def move_student_group(wb, sheet, names, target_idx):
-    """names 학생들을 target_idx 번째 CLASS 그룹으로 옮긴다(0=1반/A, 1=2반/B…).
-    모든 날짜의 기록(값·서식)은 유지하고 열 순서만 재배치하며 CLASS 헤더를 다시 그린다.
-    반환: (moved_names, 그룹라벨). 분반이 없거나 학생이 없으면 ValueError."""
-    from openpyxl.utils import get_column_letter
-    ws = wb[sheet]
-    start = _find_start_row(ws)
+def _class_header_row(ws, start):
+    """CLASS A/B 헤더가 있으면 (행번호, [라벨...]) 반환, 없으면 (None, [None])."""
     last_col = _last_col(ws, start)
-    roster = get_roster(ws)                       # name(nfc) -> col
-    names = [nfc(n) for n in names]
-    missing = [n for n in names if n not in roster]
-    if missing:
-        raise ValueError("명단에 없는 학생: " + ", ".join(missing))
     hmerges = [rng for rng in ws.merged_cells.ranges
                if rng.max_row < start and rng.min_col >= STUDENT_FIRST_COL
                and rng.max_col > rng.min_col]
     if len(hmerges) < 2:
-        raise ValueError("이 반은 분반(CLASS A/B) 구분이 없습니다.")
+        return None, [None]
     crow = min(r.min_row for r in hmerges)
-    groups = _class_groups(ws, STUDENT_FIRST_COL, last_col)   # [(label,c0,c1)]
-    labels = [g[0] for g in groups]
-    if not (0 <= target_idx < len(groups)):
-        raise ValueError("반 번호가 범위를 벗어났습니다.")
+    labels = [g[0] for g in _class_groups(ws, STUDENT_FIRST_COL, last_col)]
+    return crow, labels
 
-    # 현재 그룹별 멤버(열 순서)
-    ordered = sorted(roster.items(), key=lambda x: x[1])
-    def gof(col):
-        for i, (l, c0, c1) in enumerate(groups):
-            if c0 <= col <= c1:
-                return i
-        return len(groups) - 1
-    gmembers = [[] for _ in groups]
-    for nm, col in ordered:
-        gmembers[gof(col)].append(nm)
-    if all(nm in gmembers[target_idx] for nm in names):
-        raise ValueError("이미 그 반에 있습니다.")
-    for g in gmembers:
-        for n in names:
-            if n in g:
-                g.remove(n)
-    gmembers[target_idx].extend(names)
+
+def _reorder_columns(wb, sheet, gmembers, labels, crow):
+    """gmembers(그룹별 이름 순서)대로 학생 열을 재배치하고 CLASS 헤더·블록 병합을 다시 그린다.
+    모든 날짜의 값/서식은 그대로 따라간다. crow=None 이면 CLASS 헤더 없는 단일그룹 반."""
+    from openpyxl.utils import get_column_letter
+    ws = wb[sheet]
+    start = _find_start_row(ws)
+    last_col = _last_col(ws, start)
+    roster = get_roster(ws)
     new_order = [nm for g in gmembers for nm in g]
-
     colmap = {1: 1, 2: 2}                          # old col -> new col
     for i, nm in enumerate(new_order):
         colmap[roster[nm]] = STUDENT_FIRST_COL + i
 
-    # 새 그룹 열범위
     sizes = [len(g) for g in gmembers]
     ranges, c = [], STUDENT_FIRST_COL
     for sz in sizes:
@@ -913,25 +891,107 @@ def move_student_group(wb, sheet, names, target_idx):
     wb.move_sheet(sheet, offset=idx - wb.sheetnames.index(sheet))
     ws = wb[sheet]
 
-    # CLASS 헤더 다시 그림
-    for cc in range(STUDENT_FIRST_COL, last_col + 1):
-        ws.cell(crow, cc).value = None
-    for i, rg in enumerate(ranges):
-        if not rg:
-            continue
-        c0, c1 = rg
-        ws.cell(crow, c0).value = labels[i]
-        if c1 > c0:
-            try:
-                ws.merge_cells(start_row=crow, start_column=c0, end_row=crow, end_column=c1)
-            except Exception:
-                pass
+    if crow is not None:                          # CLASS 헤더 다시 그림
+        for cc in range(STUDENT_FIRST_COL, last_col + 1):
+            ws.cell(crow, cc).value = None
+        for i, rg in enumerate(ranges):
+            if not rg:
+                continue
+            c0, c1 = rg
+            ws.cell(crow, c0).value = labels[i] if i < len(labels) else None
+            if c1 > c0:
+                try:
+                    ws.merge_cells(start_row=crow, start_column=c0, end_row=crow, end_column=c1)
+                except Exception:
+                    pass
 
     # 각 날짜 블록의 수업내용·다음과제를 값 기준으로 다시 병합
     scols = list(range(STUDENT_FIRST_COL, STUDENT_FIRST_COL + len(new_order)))
     for r0 in range(start, max_row + 1, BLOCK_SIZE):
         for rel in (ROW_OFFSET['수업내용'], ROW_OFFSET['다음과제']):
             _merge_equal_runs(ws, r0 + rel, scols)
+
+
+def insert_students_sorted(wb, sheet, names):
+    """이미 명단 끝에 추가된 names 학생들을 (그들이 속한 마지막 그룹 안에서) 가나다순 위치로 옮긴다.
+    기존 학생 순서는 유지하고 신규생만 알맞은 자리에 끼워 넣는다."""
+    ws = wb[sheet]
+    start = _find_start_row(ws)
+    last_col = _last_col(ws, start)
+    roster = get_roster(ws)
+    names = [nfc(n) for n in names if nfc(n) in roster]
+    if not names:
+        return
+    crow, labels = _class_header_row(ws, start)
+    groups = _class_groups(ws, STUDENT_FIRST_COL, last_col)
+    ordered = sorted(roster.items(), key=lambda x: x[1])
+
+    def gof(col):
+        for i, (l, c0, c1) in enumerate(groups):
+            if c0 <= col <= c1:
+                return i
+        return len(groups) - 1
+    gmembers = [[] for _ in groups]
+    for nm, col in ordered:
+        gmembers[gof(col)].append(nm)
+    changed = False
+    for gi, g in enumerate(gmembers):
+        adds = [n for n in g if n in names]
+        if not adds:
+            continue
+        rest = [n for n in g if n not in names]     # 기존 학생(순서 유지)
+        for nm in sorted(adds):                     # 신규생을 가나다 위치에 삽입
+            pos = next((k for k, e in enumerate(rest) if e > nm), len(rest))
+            rest.insert(pos, nm)
+        if rest != g:
+            gmembers[gi] = rest
+            changed = True
+    if changed:
+        _reorder_columns(wb, sheet, gmembers, labels, crow)
+
+
+def move_student_group(wb, sheet, names, target_idx):
+    """names 학생들을 target_idx 번째 CLASS 그룹으로 옮긴다(0=1반/A, 1=2반/B…).
+    모든 날짜의 기록(값·서식)은 유지하고 열 순서만 재배치하며 CLASS 헤더를 다시 그린다.
+    반환: (moved_names, 그룹라벨). 분반이 없거나 학생이 없으면 ValueError."""
+    from openpyxl.utils import get_column_letter
+    ws = wb[sheet]
+    start = _find_start_row(ws)
+    last_col = _last_col(ws, start)
+    roster = get_roster(ws)                       # name(nfc) -> col
+    names = [nfc(n) for n in names]
+    missing = [n for n in names if n not in roster]
+    if missing:
+        raise ValueError("명단에 없는 학생: " + ", ".join(missing))
+    hmerges = [rng for rng in ws.merged_cells.ranges
+               if rng.max_row < start and rng.min_col >= STUDENT_FIRST_COL
+               and rng.max_col > rng.min_col]
+    if len(hmerges) < 2:
+        raise ValueError("이 반은 분반(CLASS A/B) 구분이 없습니다.")
+    crow = min(r.min_row for r in hmerges)
+    groups = _class_groups(ws, STUDENT_FIRST_COL, last_col)   # [(label,c0,c1)]
+    labels = [g[0] for g in groups]
+    if not (0 <= target_idx < len(groups)):
+        raise ValueError("반 번호가 범위를 벗어났습니다.")
+
+    # 현재 그룹별 멤버(열 순서)
+    ordered = sorted(roster.items(), key=lambda x: x[1])
+    def gof(col):
+        for i, (l, c0, c1) in enumerate(groups):
+            if c0 <= col <= c1:
+                return i
+        return len(groups) - 1
+    gmembers = [[] for _ in groups]
+    for nm, col in ordered:
+        gmembers[gof(col)].append(nm)
+    if all(nm in gmembers[target_idx] for nm in names):
+        raise ValueError("이미 그 반에 있습니다.")
+    for g in gmembers:
+        for n in names:
+            if n in g:
+                g.remove(n)
+    gmembers[target_idx].extend(names)
+    _reorder_columns(wb, sheet, gmembers, labels, crow)
     return names, (labels[target_idx] or f"{target_idx + 1}반")
 
 
@@ -979,9 +1039,11 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
 
     # 학적 변동 처리: 명단 추가(신규·전입) + 출석칸에 표시
     life = _norm_keys(data.get('학적') or {})
+    newly_added = []
     for st, event in life.items():
         if event in LIFECYCLE_ADD and st not in roster:
             roster[st] = add_student(ws, st)
+            newly_added.append(st)
             last_col = _last_col(ws, start)
             groups = _detect_groups(ws, start, last_col)
         mark = LIFECYCLE_MARK.get(event)
@@ -1213,6 +1275,13 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
     if isinstance(new_label, str) and new_label.strip():
         _write_value(ws, top + ROW_OFFSET['비고'], 2, new_label.strip())
         written.append(f"비고 라벨 → {new_label.strip()}")
+
+    # 신규등록생은 맨 끝이 아니라 가나다순 위치로 삽입 (모든 기록을 마친 뒤 재배치)
+    if newly_added:
+        try:
+            insert_students_sorted(wb, sheet, newly_added)
+        except Exception as e:
+            warnings.append(f"가나다순 정렬 실패(끝에 그대로 둠): {e}")
 
     return written, warnings
 
