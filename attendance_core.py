@@ -8,7 +8,7 @@
 import io, re, zipfile, datetime, calendar, unicodedata
 from copy import copy
 import openpyxl
-from openpyxl.styles import Font, Alignment, Border
+from openpyxl.styles import Font, Alignment, Border, Side
 from openpyxl.cell.cell import MergedCell
 import holidays as _holidays
 
@@ -446,6 +446,13 @@ def _strip_diagonal(cell):
         cell.border = Border(left=b.left, right=b.right, top=b.top, bottom=b.bottom)
 
 
+def _set_diagonal(cell):
+    """셀에 대각선(빗금) 테두리를 넣는다(사방 테두리는 유지). 결석생 과제칸 표시용."""
+    b = cell.border
+    cell.border = Border(left=b.left, right=b.right, top=b.top, bottom=b.bottom,
+                         diagonal=Side(style='thin', color='FF000000'), diagonalDown=True)
+
+
 def _is_holiday_block(ws, top, last_col):
     """블록에 '글자가 있는' 사각형(여러행×여러열) 병합이 있으면 공휴일/휴강 블록으로 간주.
     빈(None)·'None' 사각형 병합은 휴강이 아니라 정리 대상(소수인원 반 등)."""
@@ -825,6 +832,10 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
                 continue
             cell.value = None
             _apply_font_color(cell, COLOR_BLACK)
+            if label == '과제수행':
+                _set_diagonal(cell)    # 결석생 과제 칸은 빗금 처리
+            else:
+                _strip_diagonal(cell)
 
     def put(label, student, value):
         r = top + ROW_OFFSET[label]

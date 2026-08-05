@@ -316,7 +316,12 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None, ws_by_date=None)
                     v = c.value if c else None
                     lines = _wrap(md, v, fnt, w - pad * 2) if v not in (None, '') else []
                     n = max(n, len(lines))
-                    cells.append((w, lines, _cell_color(c) if c else BLACK))
+                    diag = False   # 결석생 과제칸 등 빗금 셀
+                    if c is not None:
+                        bd = c.border
+                        diag = bool((bd.diagonal and getattr(bd.diagonal, 'style', None))
+                                    or bd.diagonalDown or bd.diagonalUp)
+                    cells.append((w, lines, _cell_color(c) if c else BLACK, diag))
             rows.append((block_label(top, k, dt), lab, max(row_h, n * line_h + pad), merged, cells))
         blocks.append((dt, rows, hol))
 
@@ -359,9 +364,13 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None, ws_by_date=None)
             rowbg = CREAM if lab == '출석' else WHITE
             cell(date_w, ry, label_w, h, lab_text, rowbg)
             x = date_w + label_w
-            for w, lines, c in cells:
+            for cinfo in cells:
+                w, lines, c = cinfo[0], cinfo[1], cinfo[2]
+                diag = cinfo[3] if len(cinfo) > 3 else False
                 box(x, ry, w, h, WHITE if merged else rowbg)
                 put(x, ry, w, h, lines, c)
+                if diag:   # 빗금(대각선) — 결석생 과제칸
+                    d.line([(x, ry), (x + w, ry + h)], fill=GRID, width=max(1, scale // 2))
                 x += w
             ry += h
         if hol:  # 학생 영역 전체를 한 칸으로 (파일의 병합과 같은 모양)
