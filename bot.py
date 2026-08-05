@@ -2515,6 +2515,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         or any(k in low for k in ("이번주", "저번주", "지난주", "이번달"))
     ):
         return await cmd_homework(update, context)
+    # '출석부' 파일 다운로드 (예: '출석부', '출석부 7월', '7월 출석부') — 미리보기보다 먼저 판정
+    if "출석부" in low and not re.match(r"^(초|중|고)\d", low) \
+            and not any(k in low for k in ("미리보기", "캡처", "보여줘", "보여주", "이미지로")):
+        context.args = parts
+        return await cmd_download(update, context)
     if any(k in low for k in ("미리보기", "캡처", "보여줘", "보여주", "이미지로")):
         return await cmd_preview(update, context)
     # '남우현 7월' / '중1AB 이번주' / '초5 7/15' 처럼 (학생|반)+기간, 순서 무관하게 미리보기로
@@ -2529,10 +2534,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_generate(update, context)
     if low in ("시작", "도움말", "도움"):
         return await start(update, context)
-    # '출석부' 다운로드 요청 (예: '출석부', '출석부 7월', '7월 출석부 확인')
-    if "출석부" in low and not re.match(r"^(초|중|고)\d", low):
-        context.args = parts
-        return await cmd_download(update, context)
 
     parse_wb, _ = load_latest_wb()
     if parse_wb is None:
