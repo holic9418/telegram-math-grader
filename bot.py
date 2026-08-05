@@ -2765,6 +2765,9 @@ async def _preview_student(update, context, name, sheets, text):
         if sheet not in wb.sheetnames:
             continue
         dates = dates_for(sheet)
+        # 신규등록 전·퇴원 후 날짜는 그 학생 표에서 제외 (재적 기간만)
+        enroll = load_enroll().get(sheet, {})
+        dates = [d for d in dates if ac.student_active(enroll, name, d)]
         if not dates:
             continue
         img = rpt.render_student_table(name, wb[sheet], dates)
