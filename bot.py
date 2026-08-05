@@ -2130,6 +2130,19 @@ async def undo_holiday(update: Update, context: ContextTypes.DEFAULT_TYPE, date_
     await update.message.reply_text(msg, parse_mode="HTML")
 
 
+def _flex_args(parts, low, keywords, allow_mid=True):
+    """명령 키워드를 어순 무관하게 인식.
+    - 키워드가 맨 앞이면: 나머지를 args로.
+    - 키워드가 뒤/중간이면: 반(초·중·고 N)이 함께 있을 때만 명령으로 보고 키워드 뺀 나머지를 args로
+      (오작동 방지; allow_mid=False면 이 경우는 무시).
+    명령이 아니면 None."""
+    if parts and parts[0] in keywords:
+        return parts[1:]
+    if allow_mid and any(p in keywords for p in parts) and re.search(r'(초|중|고)\d', low):
+        return [p for p in parts if p not in keywords]
+    return None
+
+
 # ── 일반 텍스트 ────────────────────────────────────────────────
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -2278,14 +2291,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pre = _mtt.group(1).strip()
         context.args = pre.split() if pre else []
         return await cmd_timetable(update, context)
-    if kw in ("일정", "스케줄"):
-        context.args = parts[1:]
+    # 출결 신호가 있으면(출석 입력) 아래 어순-무관 명령 라우팅을 조심스럽게
+    _attend_signal = any(k in text for k in (
+        "결석", "지각", "조퇴", "외출", "무단", "출석", "미지참", "미수령", "미제출",
+        "다음과제", "다음 숙제", "다음숙제"))
+    _a = _flex_args(parts, low, {"일정", "스케줄"}, allow_mid=not _attend_signal)
+    if _a is not None:                       # '일정 초5' = '초5 일정'
+        context.args = _a
         return await cmd_schedule(update, context)
-    if kw in ("알림", "알람", "리마인더"):
-        context.args = parts[1:]
+    _a = _flex_args(parts, low, {"알림", "알람", "리마인더"}, allow_mid=not _attend_signal)
+    if _a is not None:                       # '알림 초5 21:00' = '초5 알림 21:00'
+        context.args = _a
         return await cmd_remind(update, context)
-    if kw in ("담당", "내반", "담당반"):
-        context.args = parts[1:]
+    _a = _flex_args(parts, low, {"담당", "내반", "담당반"}, allow_mid=not _attend_signal)
+    if _a is not None:                       # '담당 초5A' = '초5A 담당'
+        context.args = _a
         return await cmd_teacher(update, context)
     if low in ("관리자등록", "관리자", "관리자설정"):
         return await cmd_admin(update, context)
@@ -2301,8 +2321,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_add_weekday(update, context)
     if low in ("실행취소", "되돌리기", "방금취소", "입력취소", "취소하기", "복원"):
         return await cmd_undo(update, context)
-    if low in ("통계", "집계", "현황", "리포트"):
-        context.args = parts[1:]
+    _a = _flex_args(parts, low, {"통계", "집계", "현황", "리포트"}, allow_mid=not _attend_signal)
+    if _a is not None:                       # '통계 초5A' = '초5A 통계' (기존엔 '통계 초5A'도 안 됐음)
+        context.args = _a
         return await cmd_stats(update, context)
     if low in ("설정초기화", "기본설정복원", "반목록갱신"):
         return await cmd_reset_config(update, context)
@@ -2320,10 +2341,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 진도 입력: 단계어(수정/밴드/완료)가 있고 + (N단원 or 항목)이 있으면 O/X 마킹
     # (그냥 '단원평가 90점' 같은 시험 입력과 헷갈리지 않게 단계어를 필수로)
     # 단, '유형서 수정'을 수업내용으로 적은 출석 입력이 진도로 새지 않게 출결 신호가
-    # 있으면 진도 라우팅을 건너뛴다(진도 입력엔 이런 단어가 안 나온다).
-    _attend_signal = any(k in text for k in (
-        "결석", "지각", "조퇴", "외출", "무단", "출석", "미지참", "미수령", "미제출",
-        "다음과제", "다음 숙제", "다음숙제"))
+    # 있으면 진도 라우팅을 건너뛴다(_attend_signal은 위에서 계산).
     if not _attend_signal and any(k in text for k in ("수정", "밴드", "완료")):
         _has_unit = re.search(r"\d+\s*단원", text)
         _p_item = any(k in text for k in ("유형", "심화", "단원평가"))
