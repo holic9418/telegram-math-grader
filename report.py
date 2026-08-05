@@ -275,19 +275,35 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None, ws_by_date=None)
             elif lab in ('수업내용', '다음과제'):
                 r = (top + ac.ROW_OFFSET[lab]) if top else None
                 c0 = ac.STUDENT_FIRST_COL
-                # 학생 영역이 가로 병합돼 있으면 반 전체 공통, 아니면 학생별 개별(다음과제 개별 입력)
-                indiv = bool(r) and not any(
-                    rng.min_row <= r <= rng.max_row and rng.min_col <= c0 and rng.max_col > c0
+                stu_cols = [c for c in (_rcol(dt, nm) for nm, _c in roster) if c]
+                last_c = max(stu_cols or [c0])
+                # 학생 영역 '전체'가 한 칸으로 병합 → 반 전체 공통. 아니면 학생별(부분 병합 포함).
+                fully = bool(r) and any(
+                    rng.min_row <= r <= rng.max_row and rng.min_col <= c0 and rng.max_col >= last_c
                     for rng in dws.merged_cells.ranges)
-                if indiv:
+                if r and not fully:
+                    def _eff(col):   # 병합이면 앵커값/셀, 아니면 그 셀
+                        if not col:
+                            return None, None
+                        for rng in dws.merged_cells.ranges:
+                            if rng.min_row <= r <= rng.max_row and rng.min_col <= col <= rng.max_col:
+                                a = dws.cell(rng.min_row, rng.min_col)
+                                return a.value, a
+                        cc = dws.cell(r, col)
+                        return cc.value, cc
                     cells, n, merged = [], 1, False
-                    for (name, _col), w in zip(roster, stu_w):
-                        col = _rcol(dt, name)
-                        c = dws.cell(r, col) if col else None
-                        vv = c.value if c else None
-                        lines = _wrap(md, vv, fnt, w - pad * 2) if vv not in (None, '') else []
+                    pairs = [(_rcol(dt, nm), w) for (nm, _c), w in zip(roster, stu_w)]
+                    i2 = 0
+                    while i2 < len(pairs):   # 같은 숙제가 이어지면 한 칸으로 묶어 그린다
+                        col, w = pairs[i2]
+                        v, cc = _eff(col)
+                        span_w, j2 = w, i2 + 1
+                        while j2 < len(pairs) and v not in (None, '') and _eff(pairs[j2][0])[0] == v:
+                            span_w += pairs[j2][1]; j2 += 1
+                        lines = _wrap(md, v, fnt, span_w - pad * 2) if v not in (None, '') else []
                         n = max(n, len(lines))
-                        cells.append((w, lines, _cell_color(c) if c else BLACK))
+                        cells.append((span_w, lines, _cell_color(cc) if cc else BLACK))
+                        i2 = j2
                 else:
                     v = dws.cell(r, c0).value if r else None
                     lines = _wrap(md, v, fnt, merged_w - pad * 2) if v not in (None, '') else []

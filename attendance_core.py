@@ -906,6 +906,22 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
                 continue
             _write_value(ws, rq, col, val)
             cnt += 1
+        # 같은 숙제가 좌우로 이어지면 병합해 반복 표기를 없앤다(끊기면 따로 둔다)
+        scols = sorted(roster.values())
+        i2 = 0
+        while i2 < len(scols):
+            v0 = ws.cell(rq, scols[i2]).value
+            j2 = i2
+            while (j2 + 1 < len(scols) and scols[j2 + 1] == scols[j2] + 1
+                   and ws.cell(rq, scols[j2 + 1]).value == v0):
+                j2 += 1
+            if j2 > i2 and v0 not in (None, ''):
+                try:
+                    ws.merge_cells(start_row=rq, start_column=scols[i2],
+                                   end_row=rq, end_column=scols[j2])
+                except Exception:
+                    pass
+            i2 = j2 + 1
         if cnt:
             shown = ", ".join(f"{s}={x}" for s, x in list(nqn.items())[:4])
             written.append(f"다음과제(개별) = {shown}" + (f" / 나머지={default}" if default else ""))
