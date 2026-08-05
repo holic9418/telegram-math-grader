@@ -172,6 +172,9 @@ def _class_groups(ws, start, last_col):
                         rng.min_col, min(rng.max_col, last_col)))
     if out:
         out.sort(key=lambda t: t[1])
+        lbl, c0, c1 = out[-1]           # 헤더 뒤에 새로 추가된 학생은 마지막 그룹에 포함
+        if c1 < last_col:
+            out[-1] = (lbl, c0, last_col)
         return out
     return [(None, STUDENT_FIRST_COL, last_col)]
 
@@ -998,15 +1001,21 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
     rq = top + ROW_OFFSET['다음과제']
     default = None
     nqn = {}
+    ngroups = _class_groups(ws, STUDENT_FIRST_COL, last_stu)
+    ngvals = [None] * len(ngroups)   # 그룹 인덱스 -> 숙제 (A/1반=0, B/2반=1…)
     if isinstance(nq, dict):
         nqn = _norm_keys(nq)
-        for dk in ('나머지', '그외', '그 외', '기타', '전체', '기본', '_default'):
+        for dk in ('나머지', '그외', '그 외', '기타', '전체', '기본', '공통', '_default'):
             if dk in nqn:
                 default = nqn.pop(dk)
                 break
+        for k in list(nqn.keys()):        # 반(1반/2반/A/B)별 지정 추출
+            gi = _group_index(k, ngroups)
+            if gi is not None:
+                ngvals[gi] = nqn.pop(k)
     elif isinstance(nq, str) and nq.strip():
         default = nq
-    if nqn or default is not None or absent:   # 값 지정 or 결석생 있으면 학생별 처리
+    if nqn or default is not None or any(ngvals) or absent:   # 값 지정 or 결석생
         # 다음과제 '행'의 가로 병합을 모두 푼다(그룹병합 포함). 세로(열) 병합은 건드리지 않음.
         for rng in list(ws.merged_cells.ranges):
             if rng.min_row == rng.max_row == rq and rng.max_col >= STUDENT_FIRST_COL:
@@ -1025,7 +1034,13 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
                 _set_diagonal(cell)
                 continue
             _strip_diagonal(cell)               # 출석생: 재입력 대비 빗금 제거
-            val = nqn.get(st, default)
+            val = nqn.get(st)                    # 학생명 지정 최우선
+            if val in (None, ''):
+                gi = next((i for i, (lbl, c0, c1) in enumerate(ngroups)
+                           if c0 <= col <= c1), None)
+                val = ngvals[gi] if gi is not None else None
+            if val in (None, ''):
+                val = default
             if val not in (None, ''):
                 cell.value = val
                 cnt += 1
@@ -1045,9 +1060,12 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
                 except Exception:
                     pass
             i2 = j2 + 1
-        if nqn:
-            shown = ", ".join(f"{s}={x}" for s, x in list(nqn.items())[:4])
-            written.append(f"다음과제(개별) = {shown}" + (f" / 나머지={default}" if default else ""))
+        parts_nq = [f"{(ngroups[i][0] or str(i+1)+'반')}={x}"
+                    for i, x in enumerate(ngvals) if x] + \
+                   [f"{s}={x}" for s, x in list(nqn.items())[:4]]
+        if parts_nq:
+            written.append(f"다음과제(개별) = {', '.join(parts_nq)}"
+                           + (f" / 나머지={default}" if default else ""))
         elif default is not None:
             written.append(f"다음과제 = {default}")
 
