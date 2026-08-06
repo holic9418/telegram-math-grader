@@ -52,6 +52,10 @@ SUBJECT = os.environ.get("SUBJECT", "math")
 SUBJ = subjects.get(SUBJECT)
 SUBJ_NAME = SUBJ["display"]         # 예: 'Zest 수학과'
 SUBJ_ALIASES = SUBJ.get("aliases", {})   # 부르는 말 → 시트명 일부 (예: 지크→zec)
+_theme = SUBJ.get("theme")               # 과목별 미리보기 표 색
+if _theme:
+    rpt.YELLOW = tuple(_theme["header"])
+    rpt.CREAM = tuple(_theme["row"])
 log.info("과목: %s (%s)", SUBJECT, SUBJ_NAME)
 
 

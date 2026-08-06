@@ -68,6 +68,14 @@ def sdir(subject_label):
     return os.path.join(BASE, SUBJECTS[subject_label][1])
 
 
+def apply_theme(label):
+    """렌더 전에 그 과목의 표 색을 적용."""
+    t = subjects.get(SUBJECTS[label][0]).get("theme")
+    if t:
+        rpt.YELLOW = tuple(t["header"])
+        rpt.CREAM = tuple(t["row"])
+
+
 def _load_json(dd, name, default):
     p = os.path.join(dd, name)
     if os.path.exists(p):
@@ -543,6 +551,7 @@ async def send_long(bot, chat_id, text, **kw):
 
 async def send_student_views(update, context, label, dd, wb, name, sheets, rest, today):
     """한 학생의 (반별) 출결표를 이미지로 보낸다. 보낸 장수 반환."""
+    apply_theme(label)
     sent = 0
     for s in sheets:
         enroll = enroll_of(dd).get(s, {})
@@ -648,6 +657,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      if ac.find_date_block(wb[sheet], d) is not None]
             if not dates:
                 return await update.message.reply_text(f"[{label}] {sheet}: 그 기간에 수업일이 없어요.")
+            apply_theme(label)
             img = rpt.render_class_table(sheet, wb[sheet], dates)
             bio = io.BytesIO(); img.save(bio, "PNG"); bio.seek(0)
             return await update.message.reply_photo(

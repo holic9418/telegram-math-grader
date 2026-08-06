@@ -9,8 +9,8 @@ from PIL import Image, ImageDraw, ImageFont
 import attendance_core as ac
 
 # 색
-YELLOW = (255, 242, 0)
-CREAM = (253, 245, 210)
+YELLOW = (234, 226, 211)   # 헤더 배경 — 브랜드 베이지(홍보자료 배경색 계열)
+CREAM = (247, 242, 233)    # 출석 행 배경 — 연베이지
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 RED = (220, 0, 0)

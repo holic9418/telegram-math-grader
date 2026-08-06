@@ -68,6 +68,8 @@ SUBJECTS = {
         "schedules": ac.DEFAULT_SCHEDULES,
         "times": ac.DEFAULT_CLASS_TIMES,
         "hours": MATH_HOURS,
+        # 미리보기 표 색 (header=헤더 행, row=출석 행)
+        "theme": {"header": (234, 226, 211), "row": (247, 242, 233)},   # 베이지
     },
     # 영어 (모두 오후. 요일별 시간이 다른 반 있음. 알림 = 수업종료 +15분)
     "english": {
@@ -107,6 +109,7 @@ SUBJECTS = {
         "hours": ENGLISH_HOURS,
         # 별칭: 부르는 말 → 시트명 일부. 'zec'반을 '지크'라 부름.
         "aliases": {"지크": "zec"},
+        "theme": {"header": (211, 223, 233), "row": (237, 243, 248)},   # 뮤트 블루
     },
     # 국어 (시간표: 모두 오후. 알림 = 수업종료+15분)
     "korean": {
@@ -127,6 +130,7 @@ SUBJECTS = {
             "고2": {"1": "22:15", "3": "22:15"},   # 화목 8~10
         },
         "hours": KOREAN_HOURS,
+        "theme": {"header": (214, 226, 208), "row": (240, 245, 234)},   # 세이지 그린
     },
 }
 
