@@ -604,7 +604,10 @@ PARSE_SYSTEM = """너는 학원 출석부 입력 도우미다. 선생님의 한�
 - 출석/과제/학적(신규등록·퇴원·담당변경) 관련 입력이면 type="attendance", 그 외 잡담·질문이면 {"type":"other"} 만 출력.
 - sheet 는 제공된 시트 목록 중 하나와 정확히 일치해야 한다.
 - 학생명은 제공된 명단의 이름과 정확히 일치시킨다(부분/별칭이면 가장 맞는 이름으로).
-- date 는 'M/D' 형식(예: 8/4). '오늘/어제/지난 화요일' 등은 오늘 날짜 기준으로 계산.
+- date 는 'M/D' 형식(예: 8/4). 자연어 표현은 오늘 날짜 기준으로 정확히 계산해서 'M/D'로:
+  · 오늘 · 어제(-1) · 그제/그저께/엊그제(-2) · 그끄제(-3) · 내일 · 모레(+2) · 글피(+3)
+  · 'N일 전/후'(예: 3일전) · '이틀/사흘 전' · '이번주/지난주/저번주/지지난주/다음주 <요일>'
+  · 요일만 말하면 이번 주 그 요일 · '지난달/저번달'은 지난달.
 - 언급되지 않은 항목(키)은 넣지 않는다. 값이 없으면 그 키를 생략.
 - '전원/다 출석/나머지 다 출석' 같은 표현은 명단 전체에 O 로 채우되, 개별 언급(결석 등)이 우선.
 - 출석 값: 정상 출석="O"(대문자 오).
@@ -1203,17 +1206,17 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.datetime.now(KST).date()
 
     # 기간 결정
-    if any(k in text for k in ("이번주", "금주")):
+    if ac.is_this_week(text):
         mon, sun = rpt.week_bounds(today)
         wb, _, _ = load_wb_for_date(f"{mon.month}/{mon.day}")
         period, mode = f"{mon.month}/{mon.day}~{sun.month}/{sun.day}", ("week", mon, sun)
-    elif any(k in text for k in ("저번주", "지난주")):
+    elif ac.is_last_week(text):
         mon, sun = rpt.week_bounds(today - datetime.timedelta(days=7))
         wb, _, _ = load_wb_for_date(f"{mon.month}/{mon.day}")
         period, mode = f"{mon.month}/{mon.day}~{sun.month}/{sun.day}", ("week", mon, sun)
     else:
         mm = re.search(r"(\d{1,2})\s*월", text)
-        month = (12 if today.month == 1 else today.month - 1) if "지난달" in text \
+        month = (12 if today.month == 1 else today.month - 1) if ac.is_last_month(text) \
             else (int(mm.group(1)) if mm else today.month)
         wb, _, _ = load_wb_for_date(f"{month}/1")
         period, mode = f"{month}월", ("month", None, None)
@@ -2331,15 +2334,9 @@ async def handle_stray_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # ── 휴강 지정 ─────────────────────────────────────────────────
 def parse_day_token(tok):
-    """'7/20' '7.20' '오늘' '내일' '어제' → 'M/D'. 못 읽으면 None."""
-    tok = (tok or "").strip()
-    today = datetime.datetime.now(KST).date()
-    delta = {"오늘": 0, "내일": 1, "모레": 2, "어제": -1}.get(tok)
-    if delta is not None:
-        d = today + datetime.timedelta(days=delta)
-        return f"{d.month}/{d.day}"
-    m = re.match(r"^(\d{1,2})[/.](\d{1,2})$", tok)
-    return f"{int(m.group(1))}/{int(m.group(2))}" if m else None
+    """'7/20' '7.20' '오늘' '어제' '그제' '3일전' → 'M/D'. 못 읽으면 None."""
+    d = ac.resolve_rel_date((tok or "").strip(), datetime.datetime.now(KST).date())
+    return f"{d.month}/{d.day}" if d else None
 
 
 def holiday_text(reason):
@@ -2983,13 +2980,13 @@ def build_concern(text=""):
     """이 과목의 관심 학생(결석·지각·과제 미제출 두드러짐) 목록 텍스트. 없으면 안내문."""
     today = datetime.datetime.now(KST).date()
     md = re.search(r"(\d{1,2})\s*월", text)
-    if any(k in text for k in ("이번주", "금주", "저번주", "지난주")):
-        base = today if any(k in text for k in ("이번주", "금주")) else today - datetime.timedelta(days=7)
+    if ac.is_this_week(text) or ac.is_last_week(text):
+        base = today if ac.is_this_week(text) else today - datetime.timedelta(days=7)
         mon, sun = rpt.week_bounds(base)
         wb, _, _ = load_wb_for_date(f"{mon.month}/{mon.day}")
         mode, per_label = ("week", mon, sun), f"{mon.month}/{mon.day}~{sun.month}/{sun.day}"
     else:
-        month = (12 if today.month == 1 else today.month - 1) if "지난달" in text \
+        month = (12 if today.month == 1 else today.month - 1) if ac.is_last_month(text) \
             else (int(md.group(1)) if md else today.month)
         wb, _, _ = load_wb_for_date(f"{month}/1")
         mode, per_label = ("month", None, None), f"{month}월"
@@ -3071,32 +3068,8 @@ def _match_preview_sheet(text, sheets):
 
 
 def _resolve_preview_date(text):
-    """텍스트에서 날짜 추출. 오늘/어제/내일/'M월 D일'/'M/D' 지원."""
-    today = datetime.datetime.now(KST).date()
-    if '오늘' in text:
-        return today
-    if '어제' in text:
-        return today - datetime.timedelta(days=1)
-    if '내일' in text:
-        return today + datetime.timedelta(days=1)
-    # '이번주 월요일' / '저번주 수요일' / '월요일' 등 (주 + 요일)
-    wm = re.search(r'([월화수목금토일])\s*요일', text)
-    if wm:
-        wi = WD.index(wm.group(1))
-        base = today
-        if any(k in text for k in ('저번주', '지난주', '전주')):
-            base = today - datetime.timedelta(days=7)
-        elif '다음주' in text or '담주' in text:
-            base = today + datetime.timedelta(days=7)
-        monday = base - datetime.timedelta(days=base.weekday())
-        return monday + datetime.timedelta(days=wi)
-    m = re.search(r'(\d{1,2})\s*월\s*(\d{1,2})', text) or re.search(r'(\d{1,2})[/.](\d{1,2})', text)
-    if m:
-        try:
-            return datetime.date(today.year, int(m.group(1)), int(m.group(2)))
-        except ValueError:
-            return None
-    return None
+    """텍스트에서 날짜 추출(자연어 어휘 폭넓게). 못 읽으면 None."""
+    return ac.resolve_rel_date(text, datetime.datetime.now(KST).date())
 
 
 def _name_givens(nm):
@@ -3147,9 +3120,9 @@ async def _preview_student(update, context, name, sheets, text):
 
     # 기간 결정 + 파일 로드 ('이번주 월요일'처럼 요일이 콕 집히면 그날 하루)
     _has_weekday = re.search(r'[월화수목금토일]\s*요일', text)
-    if not _has_weekday and any(k in text for k in ("이번주", "금주")):
+    if not _has_weekday and ac.is_this_week(text):
         mon, sun = rpt.week_bounds(today); mode = "week"
-    elif not _has_weekday and any(k in text for k in ("저번주", "지난주")):
+    elif not _has_weekday and ac.is_last_week(text):
         mon, sun = rpt.week_bounds(today - datetime.timedelta(days=7)); mode = "week"
     else:
         mon = sun = None; mode = None
@@ -3168,7 +3141,7 @@ async def _preview_student(update, context, name, sheets, text):
             period = ds
         else:
             mm = re.search(r'(\d{1,2})\s*월', text)
-            month = (12 if today.month == 1 else today.month - 1) if '지난달' in text \
+            month = (12 if today.month == 1 else today.month - 1) if ac.is_last_month(text) \
                 else (int(mm.group(1)) if mm else today.month)
             wb, _, _ = load_wb_for_date(f"{month}/1"); mode = "month"
             period = f"{month}월"

@@ -301,17 +301,15 @@ def find_student(rest, wb):
 
 def period_dates(wb, sheet, text, today, default="week"):
     """text의 기간 표현으로 그 반의 날짜 리스트 반환. default=week|month."""
-    if any(k in text for k in ("이번주", "금주")):
+    if ac.is_this_week(text):
         mon, sun = rpt.week_bounds(today)
         return rpt.week_dates(wb[sheet], mon, sun, mon.year)
-    if any(k in text for k in ("저번주", "지난주")):
+    if ac.is_last_week(text):
         mon, sun = rpt.week_bounds(today - datetime.timedelta(days=7))
         return rpt.week_dates(wb[sheet], mon, sun, mon.year)
-    md = re.search(r"(\d{1,2})\s*[/.월]\s*(\d{1,2})", text)
-    if md:
-        return [f"{int(md.group(1))}/{int(md.group(2))}"]
-    if "오늘" in text:
-        return [f"{today.month}/{today.day}"]
+    d = ac.resolve_rel_date(text, today)          # 어제·그제·3일전·요일·M/D 등
+    if d is not None:
+        return [f"{d.month}/{d.day}"]
     if default == "month":
         return ac.sheet_dates(wb).get(sheet, [])
     mon, sun = rpt.week_bounds(today)
@@ -323,14 +321,14 @@ def subject_stats(label, text, today):
     dd = sdir(label)
     # 기간 파일 선택
     md = re.search(r"(\d{1,2})\s*월", text)
-    if any(k in text for k in ("이번주", "금주", "저번주", "지난주")):
-        base = today if any(k in text for k in ("이번주", "금주")) else today - datetime.timedelta(days=7)
+    if ac.is_this_week(text) or ac.is_last_week(text):
+        base = today if ac.is_this_week(text) else today - datetime.timedelta(days=7)
         mon, sun = rpt.week_bounds(base)
         path = month_path(dd, mon.year, mon.month)
         mode = ("week", mon, sun)
         period = f"{mon.month}/{mon.day}~{sun.month}/{sun.day}"
     else:
-        month = (12 if today.month == 1 else today.month - 1) if "지난달" in text \
+        month = (12 if today.month == 1 else today.month - 1) if ac.is_last_month(text) \
             else (int(md.group(1)) if md else today.month)
         path = month_path(dd, today.year, month)
         mode, period = ("month", None, None), f"{month}월"
@@ -380,12 +378,12 @@ def subject_stats(label, text, today):
 def _period_pick(dd, text, today):
     """text 기간에 맞는 (파일경로, mode) 반환. mode=('week',mon,sun)|('month',None,None)."""
     md = re.search(r"(\d{1,2})\s*월", text)
-    if any(k in text for k in ("이번주", "금주", "저번주", "지난주")):
-        base = today if any(k in text for k in ("이번주", "금주")) else today - datetime.timedelta(days=7)
+    if ac.is_this_week(text) or ac.is_last_week(text):
+        base = today if ac.is_this_week(text) else today - datetime.timedelta(days=7)
         mon, sun = rpt.week_bounds(base)
         path, mode = month_path(dd, mon.year, mon.month), ("week", mon, sun)
     else:
-        month = (12 if today.month == 1 else today.month - 1) if "지난달" in text \
+        month = (12 if today.month == 1 else today.month - 1) if ac.is_last_month(text) \
             else (int(md.group(1)) if md else today.month)
         path, mode = month_path(dd, today.year, month), ("month", None, None)
     if not os.path.exists(path):
@@ -394,11 +392,11 @@ def _period_pick(dd, text, today):
 
 
 def period_label(text, today):
-    if any(k in text for k in ("이번주", "금주")):
+    if ac.is_this_week(text):
         return "이번주"
-    if any(k in text for k in ("저번주", "지난주")):
+    if ac.is_last_week(text):
         return "지난주"
-    if "지난달" in text:
+    if ac.is_last_month(text):
         return "지난달"
     md = re.search(r"(\d{1,2})\s*월", text)
     return f"{md.group(1)}월" if md else "이번 달"

@@ -112,6 +112,63 @@ def _last_col(ws, start):
     return last
 
 
+# ── 자연어 날짜·기간 어휘 (조회 명령·마스터봇 공통) ─────────────
+_WD_KR = "월화수목금토일"
+_NATIVE_DAYS = {"하루": 1, "이틀": 2, "사흘": 3, "나흘": 4, "닷새": 5, "엿새": 6, "이레": 7}
+
+
+def resolve_rel_date(text, today):
+    """자연어 표현 → date. 못 읽으면 None.
+    오늘/금일 · 어제 · 그제·그저께·엊그제(-2) · 그끄제·그끄저께(-3) · 내일·명일 · 모레(+2) · 글피(+3)
+    · N일 전/후 · 이틀·사흘…전/후 · 이번주/지난주/저번주/지지난주/다음주 <요일> · M월 D일 · M/D · M.D"""
+    t = str(text)
+    m = re.search(r'(\d+)\s*일\s*(전|앞|뒤|후)', t)
+    if m:
+        n = int(m.group(1))
+        sign = -1 if m.group(2) in ("전", "앞") else 1
+        return today + datetime.timedelta(days=sign * n)
+    m = re.search(r'(하루|이틀|사흘|나흘|닷새|엿새|이레)\s*(전|앞|뒤|후)', t)
+    if m:
+        sign = -1 if m.group(2) in ("전", "앞") else 1
+        return today + datetime.timedelta(days=sign * _NATIVE_DAYS[m.group(1)])
+    for kw, d in (("그끄저께", -3), ("그끄제", -3), ("엊그제", -2), ("그저께", -2),
+                  ("그제", -2), ("어제", -1), ("오늘", 0), ("금일", 0),
+                  ("내일", 1), ("명일", 1), ("모레", 2), ("글피", 3)):
+        if kw in t:
+            return today + datetime.timedelta(days=d)
+    wm = re.search(r'([월화수목금토일])\s*요일', t)
+    if wm:
+        wi = _WD_KR.index(wm.group(1))
+        base = today
+        if any(k in t for k in ("지지난주", "지지난 주", "전전주")):
+            base = today - datetime.timedelta(days=14)
+        elif any(k in t for k in ("저번주", "지난주", "전주", "저번 주", "지난 주")):
+            base = today - datetime.timedelta(days=7)
+        elif any(k in t for k in ("다음주", "담주", "다음 주", "차주")):
+            base = today + datetime.timedelta(days=7)
+        monday = base - datetime.timedelta(days=base.weekday())
+        return monday + datetime.timedelta(days=wi)
+    m = re.search(r'(\d{1,2})\s*월\s*(\d{1,2})', t) or re.search(r'(\d{1,2})[/.](\d{1,2})', t)
+    if m:
+        try:
+            return datetime.date(today.year, int(m.group(1)), int(m.group(2)))
+        except ValueError:
+            return None
+    return None
+
+
+def is_this_week(t):
+    return any(k in str(t) for k in ("이번주", "금주", "이번 주"))
+
+
+def is_last_week(t):
+    return any(k in str(t) for k in ("저번주", "지난주", "전주", "저번 주", "지난 주"))
+
+
+def is_last_month(t):
+    return any(k in str(t) for k in ("지난달", "저번달", "전달", "전월", "지난 달", "저번 달"))
+
+
 def infer_schedule(ws):
     """기존 시트의 날짜들로부터 수업 요일 집합 추론."""
     start = _find_start_row(ws)
