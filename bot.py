@@ -3280,7 +3280,7 @@ async def cmd_homework(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """'7월 15일 원서진 과제' → 그 학생의 그날 과제수행·다음과제를 챗으로 알려준다."""
     chat_id = update.effective_chat.id
     remember_chat(chat_id)
-    text = update.message.text
+    text = apply_aliases(update.message.text)
     latest, _ = load_latest_wb()
     if latest is None:
         await update.message.reply_text("아직 출석부 파일이 없어요.")
@@ -3317,7 +3317,7 @@ async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """'초5 7월 15일 미리보기'(반+날짜) 또는 '남우현 7월'(학생+기간)을 이미지로 보낸다."""
     chat_id = update.effective_chat.id
     remember_chat(chat_id)
-    text = update.message.text
+    text = apply_aliases(update.message.text)
     latest, _ = load_latest_wb()
     if latest is None:
         await update.message.reply_text("아직 출석부 파일이 없어요.")
