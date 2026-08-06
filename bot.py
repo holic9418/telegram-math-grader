@@ -1826,14 +1826,20 @@ async def cmd_transfer_admin(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if m[key].get("status") != "approved":     # 넘기는 김에 승인도 처리
         m[key]["status"] = "approved"
         save_members(m)
+    old = update.effective_chat.id             # 넘긴 사람은 관리자로 남는다(멤버 강등 아님)
     set_master(new_id)
+    admins = load_admins()
+    admins[str(old)] = {
+        "name": (update.effective_user.full_name if update.effective_user else str(old)),
+        "status": "approved"}
+    save_admins(admins)
     name = m[key].get("name") or key
     env = next((os.environ.get(k) or "" for k in ("MASTER_CHAT_ID", "ADMIN_CHAT_ID")
                 if (os.environ.get(k) or "").strip().lstrip("-").isdigit()), "")
     warn = ("\n\n⚠️ 단, 지금 <code>MASTER_CHAT_ID</code>(또는 ADMIN_CHAT_ID) 환경변수가 설정돼 있어 그게 우선이에요. "
             "완전히 넘기려면 그 환경변수를 지우거나 새 번호로 바꿔주세요.") if env else ""
     await update.message.reply_text(
-        f"✅ 마스터를 <b>{name}</b> 님께 넘겼어요. 이제 이 계정은 일반 멤버예요.{warn}",
+        f"✅ 마스터를 <b>{name}</b> 님께 넘겼어요. <b>본인은 관리자로 남습니다.</b>{warn}",
         parse_mode="HTML")
     try:
         await context.bot.send_message(
