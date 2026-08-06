@@ -373,6 +373,102 @@ def subject_stats(label, text, today):
             f"• 과제 미제출: {hw_x}건")
 
 
+# ── 관심 학생 (결석·지각·과제 미제출 두드러진 학생) ────────────
+def _period_pick(dd, text, today):
+    """text 기간에 맞는 (파일경로, mode) 반환. mode=('week',mon,sun)|('month',None,None)."""
+    md = re.search(r"(\d{1,2})\s*월", text)
+    if any(k in text for k in ("이번주", "금주", "저번주", "지난주")):
+        base = today if any(k in text for k in ("이번주", "금주")) else today - datetime.timedelta(days=7)
+        mon, sun = rpt.week_bounds(base)
+        path, mode = month_path(dd, mon.year, mon.month), ("week", mon, sun)
+    else:
+        month = (12 if today.month == 1 else today.month - 1) if "지난달" in text \
+            else (int(md.group(1)) if md else today.month)
+        path, mode = month_path(dd, today.year, month), ("month", None, None)
+    if not os.path.exists(path):
+        path = latest_file(dd)
+    return path, mode
+
+
+def period_label(text, today):
+    if any(k in text for k in ("이번주", "금주")):
+        return "이번주"
+    if any(k in text for k in ("저번주", "지난주")):
+        return "지난주"
+    if "지난달" in text:
+        return "지난달"
+    md = re.search(r"(\d{1,2})\s*월", text)
+    return f"{md.group(1)}월" if md else "이번 달"
+
+
+def concern_in_subject(label, text, today):
+    dd = sdir(label)
+    path, mode = _period_pick(dd, text, today)
+    if not path:
+        return []
+    wb = ac.load_workbook(path)
+
+    def dates_for(sheet):
+        if mode[0] == "week":
+            return rpt.week_dates(wb[sheet], mode[1], mode[2], mode[1].year)
+        return ac.sheet_dates(wb).get(sheet, [])
+
+    out = []
+    for sheet in wb.sheetnames:
+        ws = wb[sheet]
+        roster = ac.get_roster(ws)
+        if not roster:
+            continue
+        cnt = {n: [0, 0, 0] for n in roster}     # 결석, 지각/조퇴, 과제 미제출
+        for ds in dates_for(sheet):
+            top = ac.find_date_block(ws, ds)
+            if top is None or ac.attendance_recorded(ws, ds) is False:
+                continue
+            if input_blocked(dd, sheet, ds):
+                continue
+            for n, col in roster.items():
+                av = ws.cell(top + ac.ROW_OFFSET["출석"], col).value
+                if av not in (None, ""):
+                    if ac.is_absent(av):
+                        cnt[n][0] += 1
+                    elif ac._is_late(str(av)) or "조퇴" in str(av):
+                        cnt[n][1] += 1
+                hv = ws.cell(top + ac.ROW_OFFSET["과제수행"], col).value
+                if hv is not None and str(hv).strip().upper().startswith("X"):
+                    cnt[n][2] += 1
+        for n, (ab, la, hw) in cnt.items():
+            score = ab * 2 + la + hw
+            if score >= 3:                       # 결석·지각·과제미제출이 두드러진 기준
+                out.append((score, n, label, sheet, ab, la, hw))
+    return out
+
+
+def concern_students(text, today):
+    rows = []
+    for lb in SUBJECTS:
+        try:
+            rows += concern_in_subject(lb, text, today)
+        except Exception as e:
+            log.warning("관심학생 계산 실패 %s: %s", lb, e)
+    per = period_label(text, today)
+    if not rows:
+        return f"✅ 관심 학생 없음 · {per}\n(기간 내 결석·지각·과제 미제출이 두드러진 학생이 없어요.)"
+    rows.sort(key=lambda r: (-r[0], r[2], r[3]))
+    lines = [f"⚠️ <b>관심 학생</b> · {per} (결석·지각·과제 미제출 기준)"]
+    for score, n, lb, sheet, ab, la, hw in rows[:40]:
+        det = []
+        if ab:
+            det.append(f"결석{ab}")
+        if la:
+            det.append(f"지각/조퇴{la}")
+        if hw:
+            det.append(f"과제미제출{hw}")
+        lines.append(f"• <b>{n}</b> · {lb} {sheet} — {' '.join(det)}")
+    if len(rows) > 40:
+        lines.append(f"…외 {len(rows) - 40}명")
+    return "\n".join(lines)
+
+
 # ── 주간보고서 ─────────────────────────────────────────────────
 def subject_weekly(label, today):
     dd = sdir(label)
@@ -423,6 +519,7 @@ GUIDE = (
     "• <b>현황</b> — 세 과목 미입력 반 한눈에\n"
     "• <b>수학 초5 이번주 미리보기</b> — 과목·반·기간 지정 출석표\n"
     "• <b>원서진</b> / <b>수학 원서진</b> — 특정 학생 출결(과목 생략 시 세 과목 전체에서 검색)\n"
+    "• <b>관심 학생</b> — 결석·지각·과제 미제출 두드러진 학생(과목 전체, 기간 지정 가능)\n"
     "• <b>시간표</b> / <b>수학 시간표</b> / <b>영어 시간표 월</b> — 수업 시간표\n"
     "• <b>국어 통계 이번주</b> — 출석률·결석·과제 미제출\n"
     "• <b>영어 주간보고서</b> / <b>주간보고서</b>(세 과목 전부)\n\n"
@@ -497,6 +594,9 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if low in ("현황", "미입력", "미입력현황", "전체현황"):
         return await send_long(context.bot, chat_id, build_status(today), parse_mode="HTML")
+
+    if "관심" in low or ("결석" in low and "많" in low):
+        return await send_long(context.bot, chat_id, concern_students(low, today), parse_mode="HTML")
 
     if "시간표" in low:
         label, rest = parse_subject(low)
