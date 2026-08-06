@@ -1110,7 +1110,7 @@ async def cmd_timetable(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 3) 반/학년 필터 (예: '초5A' 또는 학년만 '초5' → 초5A·초5B 등 묶어서)
     if arg:
-        an = arg.replace(" ", "")
+        an = re.sub(r'반$', '', arg.replace(" ", ""))   # '초5반'·'초등zec반' → 반 떼기
         exact = arg if arg in active else next((c for c in active if c.replace(" ", "") == an), None)
         matched = [exact] if exact else [c for c in active if c.replace(" ", "").startswith(an)]
         if matched:
@@ -2815,8 +2815,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # '남우현 7월' / '중1AB 이번주' / '초5 7/15' 처럼 (학생|반)+기간, 순서 무관하게 미리보기로
     _period = (r'(?:\d{1,2}\s*월|이번달|지난달|이번주|저번주|지난주|오늘|어제|\d{1,2}[/.]\d{1,2})'
                r'\s*(?:미리보기|보여줘|보여주세요|캡처|이미지로?)?')
-    # 반: '중2' '초5A' '초3-1' '중3-2' '고2(미적분)' '초등zec' '중등zec' 등
-    _cls = r'(?:(?:초|중|고)\d[a-zA-Z]*(?:-\d+)?(?:\([^)]*\))?|(?:초|중)등[a-zA-Z]+)'
+    # 반: '중2' '초5A' '초3-1' '중3-2' '고2(미적분)' '초등zec' '중등zec' (+ 뒤에 '반' 붙어도)
+    _cls = r'(?:(?:초|중|고)\d[a-zA-Z]*(?:-\d+)?(?:\([^)]*\))?|(?:초|중)등[a-zA-Z]+)반?'
     _stu = r'[가-힣]{2,4}'
     if any(re.fullmatch(a + r'\s+' + b, low)
            for a, b in ((_stu, _period), (_period, _stu), (_cls, _period), (_period, _cls))):

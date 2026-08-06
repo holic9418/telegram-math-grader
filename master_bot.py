@@ -192,7 +192,7 @@ def subject_timetable(label, rest, today):
         head = f"📅 <b>[{label}] {'·'.join(WD[i] for i in days)} 시간표</b>"
         return head + "\n" + ("\n".join(lines) if lines else "  그 요일 수업 없음")
     if rest:
-        rn = rest.replace(" ", "")
+        rn = re.sub(r'반$', '', rest.replace(" ", ""))   # '초5반'·'초등zec반' → 반 떼기
         exact = rest if rest in active else next(
             (c for c in active if c.replace(" ", "") == rn), None)
         # 정확한 반 없으면 학년 접두어로 매칭(초5 → 초5A·초5B·초5-1·초5-2 …)
