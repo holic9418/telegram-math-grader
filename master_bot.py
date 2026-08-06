@@ -192,14 +192,33 @@ def subject_timetable(label, rest, today):
         head = f"📅 <b>[{label}] {'·'.join(WD[i] for i in days)} 시간표</b>"
         return head + "\n" + ("\n".join(lines) if lines else "  그 요일 수업 없음")
     if rest:
-        cls = rest if rest in active else next(
-            (c for c in active if c.replace(" ", "") == rest.replace(" ", "")), None)
-        if cls:
-            parts = [f"{WD[i]} {(hours.get(cls) or {}).get(str(i), '')}".strip()
-                     for i in sorted(active[cls])]
-            note = "\n⏹ 이번 주까지만 수업(종강)" if cls in ending else ""
-            return f"📅 <b>[{label}] {cls} 시간표</b>\n• " + "\n• ".join(parts) + note
-        return f"[{label}] '{rest}' 반을 못 찾았어요."
+        rn = rest.replace(" ", "")
+        exact = rest if rest in active else next(
+            (c for c in active if c.replace(" ", "") == rn), None)
+        # 정확한 반 없으면 학년 접두어로 매칭(초5 → 초5A·초5B·초5-1·초5-2 …)
+        matched = [exact] if exact else [c for c in active if c.replace(" ", "").startswith(rn)]
+        if not matched:
+            return f"[{label}] '{rest}' 반을 못 찾았어요."
+        groups, order = {}, []      # 같은 시간표끼리 묶기(A/B·1반2반은 시간 동일)
+        for c in matched:
+            sig = tuple((i, (hours.get(c) or {}).get(str(i), "")) for i in sorted(active[c]))
+            if sig not in groups:
+                order.append(sig); groups[sig] = []
+            groups[sig].append(c)
+        blocks = []
+        for sig in order:
+            classes = groups[sig]
+            lines = [f"{WD[i]} {t}".strip() for i, t in sig]
+            if len(matched) == 1:
+                head = f"[{label}] {classes[0]} 시간표"
+            elif len(order) == 1:
+                head = f"[{label}] {rest} 시간표"
+            else:
+                head = f"[{label}] {'·'.join(classes)} 시간표"
+            note = "  (" + ", ".join(classes) + ")" if len(classes) > 1 else ""
+            end = "\n⏹ 이번 주까지만 수업(종강)" if any(c in ending for c in classes) else ""
+            blocks.append(f"📅 <b>{head}</b>{note}\n• " + "\n• ".join(lines) + end)
+        return "\n\n".join(blocks)
     lines = _byday(active, hours, None, ending)
     return f"📅 <b>[{label}] 주간 시간표</b>\n" + ("\n".join(lines) if lines else "  등록된 반 없음")
 
