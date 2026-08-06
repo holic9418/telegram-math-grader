@@ -1068,6 +1068,55 @@ def _write_value(ws, r, c, val):
     cell.value = val
 
 
+def clear_cell(ws, date_str, student=None, field='출석'):
+    """특정 칸을 비운다. field ∈ 출석/과제수행/다음과제/비고/수업내용.
+    · 수업내용: 그 날 반 전체 칸을 비움.
+    · 학생 지정: 그 학생의 해당 항목 칸만 비움(가로 병합이면 이웃 값은 보존).
+    반환: True(비움) / False(날짜·학생 못 찾음)."""
+    if field not in ROW_OFFSET:
+        return False
+    top = find_date_block(ws, date_str)
+    if top is None:
+        return False
+    r = top + ROW_OFFSET[field]
+    start = _find_start_row(ws)
+    last = _last_col(ws, start)
+    if field == '수업내용':
+        for rng in list(ws.merged_cells.ranges):
+            if rng.min_row == rng.max_row == r and rng.max_col >= STUDENT_FIRST_COL:
+                try:
+                    ws.unmerge_cells(str(rng))
+                except (KeyError, ValueError):
+                    ws.merged_cells.ranges.discard(rng)
+        for c in range(STUDENT_FIRST_COL, last + 1):
+            cell = ws.cell(r, c)
+            if not isinstance(cell, MergedCell):
+                cell.value = None
+        return True
+    roster = get_roster(ws)
+    col = roster.get(nfc(student or ''))
+    if col is None:
+        return False
+    # 이 칸을 덮는 가로 병합이 있으면 값을 각 칸에 펼치고 병합 해제(이웃 보존)
+    for rng in list(ws.merged_cells.ranges):
+        if (rng.min_row == rng.max_row == r and rng.min_col <= col <= rng.max_col
+                and rng.max_col > rng.min_col):
+            val = ws.cell(r, rng.min_col).value
+            try:
+                ws.unmerge_cells(str(rng))
+            except (KeyError, ValueError):
+                ws.merged_cells.ranges.discard(rng)
+            for c in range(rng.min_col, rng.max_col + 1):
+                ws.cell(r, c).value = val
+            break
+    cell = ws.cell(r, col)
+    if isinstance(cell, MergedCell):
+        return False
+    cell.value = None
+    _strip_diagonal(cell)
+    return True
+
+
 def write_attendance(wb, sheet, date_str, data, enroll=None):
     """data 예:
        {'출석': {'김규림':'O','남우현':'X(결석)'},
