@@ -51,7 +51,16 @@ CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
 SUBJECT = os.environ.get("SUBJECT", "math")
 SUBJ = subjects.get(SUBJECT)
 SUBJ_NAME = SUBJ["display"]         # 예: 'Zest 수학과'
+SUBJ_ALIASES = SUBJ.get("aliases", {})   # 부르는 말 → 시트명 일부 (예: 지크→zec)
 log.info("과목: %s (%s)", SUBJECT, SUBJ_NAME)
+
+
+def apply_aliases(s):
+    """반 별칭을 시트명 표기로 치환 (예: '지크반'→'zec반'). 과목별 aliases 기준."""
+    for k, v in SUBJ_ALIASES.items():
+        if k in s:
+            s = s.replace(k, v)
+    return s
 # 저장 폴더 우선순위: DATA_DIR > Railway 볼륨 자동경로 > 로컬 ./data
 DATA_DIR = (
     os.environ.get("DATA_DIR")
@@ -2460,7 +2469,7 @@ def _flex_args(parts, low, keywords, allow_mid=True):
 # ── 일반 텍스트 ────────────────────────────────────────────────
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    text = update.message.text.strip()
+    text = apply_aliases(update.message.text.strip())   # '지크반'→'zec반' 등 별칭 치환
     # 처음 말 거는 쌤에게는 사용 안내를 공지처럼 먼저 보낸다
     first_contact = chat_id not in known_chats()
     remember_chat(chat_id)
