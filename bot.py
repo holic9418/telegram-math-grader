@@ -1108,15 +1108,27 @@ async def cmd_timetable(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
         return
 
-    # 3) 반 필터 (예: '초5A')
+    # 3) 반/학년 필터 (예: '초5A' 또는 학년만 '초5' → 초5A·초5B 등 묶어서)
     if arg:
-        cls = arg if arg in active else next((c for c in active if c.replace(" ", "") == arg.replace(" ", "")), None)
-        if cls:
-            parts = [f"{WD[i]} {(hours.get(cls) or {}).get(str(i), '')}".strip() for i in sorted(active[cls])]
-            note = "\n⏹ 종강한 반이라 이번 주까지만 수업해요." if cls in ending else ""
-            await update.message.reply_text(
-                f"📅 <b>{cls}</b> 수업 시간표\n• " + "\n• ".join(parts) + note, parse_mode="HTML"
-            )
+        an = arg.replace(" ", "")
+        exact = arg if arg in active else next((c for c in active if c.replace(" ", "") == an), None)
+        matched = [exact] if exact else [c for c in active if c.replace(" ", "").startswith(an)]
+        if matched:
+            groups, order = {}, []      # 같은 시간표끼리 묶기(A/B·1반2반은 시간 동일)
+            for c in matched:
+                sig = tuple((i, (hours.get(c) or {}).get(str(i), "")) for i in sorted(active[c]))
+                if sig not in groups:
+                    order.append(sig); groups[sig] = []
+                groups[sig].append(c)
+            blocks = []
+            for sig in order:
+                classes = groups[sig]
+                lines = [f"{WD[i]} {t}".strip() for i, t in sig]
+                head = classes[0] if len(matched) == 1 else (arg if len(order) == 1 else "·".join(classes))
+                note = "  (" + ", ".join(classes) + ")" if len(classes) > 1 else ""
+                end = "\n⏹ 종강한 반이라 이번 주까지만 수업해요." if any(c in ending for c in classes) else ""
+                blocks.append(f"📅 <b>{head}</b> 수업 시간표{note}\n• " + "\n• ".join(lines) + end)
+            await update.message.reply_text("\n\n".join(blocks), parse_mode="HTML")
             return
         await update.message.reply_text(
             f"'{arg}'를 못 알아들었어요. 예) 시간표 / 시간표 월 / 시간표 초5A / 시간표 담당"
