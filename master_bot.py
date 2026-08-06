@@ -119,6 +119,80 @@ def input_blocked(dd, sheet, date_str):
     return datetime.date(y, dm, dd2) > csun
 
 
+def sched_of(dd, key):
+    j = _load_json(dd, "schedules.json", None)
+    return j if j else dict(subjects.get(key)["schedules"])
+
+
+def hours_of(dd, key):
+    j = _load_json(dd, "class_hours.json", None)
+    return j if j else {k: dict(v) for k, v in (subjects.get(key).get("hours") or {}).items()}
+
+
+def parse_weekdays(text):
+    base = str(text).replace("요일", "")
+    return sorted({WD.index(ch) for ch in base if ch in WD})
+
+
+def _byday(active, hours, only_days, ending):
+    byday = {i: [] for i in range(7)}
+    for cls, idxs in active.items():
+        for i in idxs:
+            if only_days is not None and i not in only_days:
+                continue
+            hr = (hours.get(cls) or {}).get(str(i), "")
+            byday[i].append((hr or "99:99", cls, hr))
+    lines = []
+    for i in range(7):
+        items = sorted(byday[i], key=lambda x: (x[0], x[1]))
+        if not items:
+            continue
+        parts = []
+        for _, cls, hr in items:
+            lab = f"{cls} {hr}" if hr else f"{cls}(시간 미설정)"
+            if cls in ending:
+                lab += " ⏹이번주 종강"
+            parts.append(lab)
+        lines.append(f"<b>[{WD[i]}]</b>\n  " + "\n  ".join(parts))
+    return lines
+
+
+def subject_timetable(label, rest, today):
+    """한 과목의 주간 시간표 텍스트. rest에 요일/반 필터 가능."""
+    key, dd = SUBJECTS[label][0], sdir(label)
+    scheds, hours, closed = sched_of(dd, key), hours_of(dd, key), closed_of(dd)
+    active, ending = {}, set()
+    for c, idxs in scheds.items():
+        day = closed.get(c)
+        if day:
+            try:
+                cm, cd = map(int, str(day).split("/"))
+                _, csun = rpt.week_bounds(datetime.date(today.year, cm, cd))
+            except ValueError:
+                csun = None
+            if csun and today > csun:
+                continue                       # 종강 주 지났으면 시간표에서 제외
+            ending.add(c)
+        active[c] = idxs
+    rest = re.sub(r"시간표|수업", " ", rest).strip()
+    days = parse_weekdays(rest) if rest else []
+    if rest and days and all(ch in "월화수목금토일요일 " for ch in rest):
+        lines = _byday(active, hours, set(days), ending)
+        head = f"📅 <b>[{label}] {'·'.join(WD[i] for i in days)} 시간표</b>"
+        return head + "\n" + ("\n".join(lines) if lines else "  그 요일 수업 없음")
+    if rest:
+        cls = rest if rest in active else next(
+            (c for c in active if c.replace(" ", "") == rest.replace(" ", "")), None)
+        if cls:
+            parts = [f"{WD[i]} {(hours.get(cls) or {}).get(str(i), '')}".strip()
+                     for i in sorted(active[cls])]
+            note = "\n⏹ 이번 주까지만 수업(종강)" if cls in ending else ""
+            return f"📅 <b>[{label}] {cls} 시간표</b>\n• " + "\n• ".join(parts) + note
+        return f"[{label}] '{rest}' 반을 못 찾았어요."
+    lines = _byday(active, hours, None, ending)
+    return f"📅 <b>[{label}] 주간 시간표</b>\n" + ("\n".join(lines) if lines else "  등록된 반 없음")
+
+
 def alarm_blocked(dd, sheet, date_str):
     """종강한 반은 종강일부터(그 주 포함) 미입력 집계 제외."""
     closed = closed_of(dd).get(sheet)
@@ -349,6 +423,7 @@ GUIDE = (
     "• <b>현황</b> — 세 과목 미입력 반 한눈에\n"
     "• <b>수학 초5 이번주 미리보기</b> — 과목·반·기간 지정 출석표\n"
     "• <b>원서진</b> / <b>수학 원서진</b> — 특정 학생 출결(과목 생략 시 세 과목 전체에서 검색)\n"
+    "• <b>시간표</b> / <b>수학 시간표</b> / <b>영어 시간표 월</b> — 수업 시간표\n"
     "• <b>국어 통계 이번주</b> — 출석률·결석·과제 미제출\n"
     "• <b>영어 주간보고서</b> / <b>주간보고서</b>(세 과목 전부)\n\n"
     "필요할 때 직접 물어보시면 돼요. (자동 전송은 꺼져 있어요)"
@@ -422,6 +497,14 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if low in ("현황", "미입력", "미입력현황", "전체현황"):
         return await send_long(context.bot, chat_id, build_status(today), parse_mode="HTML")
+
+    if "시간표" in low:
+        label, rest = parse_subject(low)
+        if label:
+            return await send_long(context.bot, chat_id,
+                                   subject_timetable(label, rest, today), parse_mode="HTML")
+        blocks = [subject_timetable(lb, low, today) for lb in SUBJECTS]
+        return await send_long(context.bot, chat_id, "\n\n".join(blocks), parse_mode="HTML")
 
     if "주간보고서" in low or low in ("보고서", "주간출결"):
         label, _ = parse_subject(low)
