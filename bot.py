@@ -136,7 +136,7 @@ _GLUE_WORDS = [
     "수업시간표", "주간시간표", "시간표", "출석부", "미리보기", "실행취소", "되돌리기",
     "방금취소", "요일추가", "주간보고서", "관리자등록", "도움말", "안내문",
     "신규개강", "신규등록", "공휴일", "휴강", "설정백업", "데이터백업",
-    "마스터등록", "관리자신청",
+    "마스터등록", "관리자신청", "관심학생",
     "이번주", "저번주", "지난주", "다음주", "이번달", "지난달",
 ]
 _GLUE_RE = [(re.compile(r"\s*".join(map(re.escape, w))), w) for w in _GLUE_WORDS]
@@ -2663,6 +2663,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cmd_backup_config(update, context)
     if low in ("주간보고서", "보고서", "주간출결"):
         return await cmd_report(update, context)
+    if "관심" in low and ("학생" in low or low.strip() in ("관심", "관심학생")):
+        txt = build_concern(low)
+        return await update.message.reply_text(
+            txt or "출석부 파일이 없어요.", parse_mode="HTML")
     # ── 분반 이동: '중3 임건 2반으로' / '중3 임건 정승민 A반으로' ──
     _move_trig = (
         re.search(r'(?:\d+|class\s*[ab]|[ab])\s*반\s*(?:으?로|에)\s*'
@@ -2975,6 +2979,63 @@ def generate_weekly_report(target=None):
     return (out, n) if n else (None, 0)
 
 
+def build_concern(text=""):
+    """이 과목의 관심 학생(결석·지각·과제 미제출 두드러짐) 목록 텍스트. 없으면 안내문."""
+    today = datetime.datetime.now(KST).date()
+    md = re.search(r"(\d{1,2})\s*월", text)
+    if any(k in text for k in ("이번주", "금주", "저번주", "지난주")):
+        base = today if any(k in text for k in ("이번주", "금주")) else today - datetime.timedelta(days=7)
+        mon, sun = rpt.week_bounds(base)
+        wb, _, _ = load_wb_for_date(f"{mon.month}/{mon.day}")
+        mode, per_label = ("week", mon, sun), f"{mon.month}/{mon.day}~{sun.month}/{sun.day}"
+    else:
+        month = (12 if today.month == 1 else today.month - 1) if "지난달" in text \
+            else (int(md.group(1)) if md else today.month)
+        wb, _, _ = load_wb_for_date(f"{month}/1")
+        mode, per_label = ("month", None, None), f"{month}월"
+    if wb is None:
+        wb, _ = load_latest_wb()
+    if wb is None:
+        return None
+
+    def dates_for(sheet):
+        if mode[0] == "week":
+            return rpt.week_dates(wb[sheet], mode[1], mode[2], mode[1].year)
+        return ac.sheet_dates(wb).get(sheet, [])
+
+    rows = []
+    for sheet in wb.sheetnames:
+        ws = wb[sheet]
+        if not ac.get_roster(ws):
+            continue
+        dates = [d for d in dates_for(sheet) if not class_input_blocked(sheet, d)]
+        for nm, s in _collect_stats(ws, dates).items():
+            score = s["absent"] * 2 + s["late"] + s["hw_miss"]
+            if score >= 3:
+                rows.append((score, nm, sheet, s["absent"], s["late"], s["hw_miss"]))
+    rows.sort(key=lambda r: (-r[0], r[2]))
+    if not rows:
+        return f"✅ {SUBJ_NAME} 관심 학생 없음 · {per_label}"
+    lines = [f"⚠️ <b>{SUBJ_NAME} 관심 학생</b> · {per_label} (결석·지각·과제 미제출 기준)"]
+    for score, nm, sheet, ab, la, hw in rows[:40]:
+        det = []
+        if ab:
+            det.append(f"결석{ab}")
+        if la:
+            det.append(f"지각/조퇴{la}")
+        if hw:
+            det.append(f"과제미제출{hw}")
+        lines.append(f"• <b>{nm}</b> · {sheet} — {' '.join(det)}")
+    if len(rows) > 40:
+        lines.append(f"…외 {len(rows) - 40}명")
+    return "\n".join(lines)
+
+
+def admin_recipients():
+    """하위 관리자(마스터 제외) chat_id 목록 — 과목별 관심학생 전송 대상."""
+    return [int(k) for k, v in load_admins().items() if v.get("status") == "approved"]
+
+
 async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     remember_chat(chat_id)
@@ -2990,6 +3051,9 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
             document=f, filename=os.path.basename(out),
             caption=f"📄 주간 출결 보고서 · {n}개 반"
         )
+    concern = build_concern("이번주")           # 보고서와 함께 관심 학생도
+    if concern:
+        await update.message.reply_text(concern, parse_mode="HTML")
 
 
 # ── 특정 날짜·반 미리보기(이미지) ──────────────────────────────
@@ -3271,7 +3335,7 @@ async def report_job(context: ContextTypes.DEFAULT_TYPE):
     if not out:
         log.info("주간 보고서: 이번 주 데이터 없음")
         return
-    to = get_admin() or get_report_to()  # 관리자에게만(없으면 기존 수신자)
+    to = get_admin() or get_report_to()  # 마스터에게(없으면 기존 수신자)
     recipients = [to] if to else known_chats()
     for chat_id in recipients:
         try:
@@ -3282,6 +3346,14 @@ async def report_job(context: ContextTypes.DEFAULT_TYPE):
                 )
         except Exception as e:
             log.warning("주간 보고서 전송 실패 %s: %s", chat_id, e)
+    # 과목별 관심 학생을 각 관리자에게 (마스터는 마스터봇이 세 과목 합쳐 보냄)
+    concern = build_concern("이번주")
+    if concern:
+        for chat_id in admin_recipients():
+            try:
+                await context.bot.send_message(chat_id, concern, parse_mode="HTML")
+            except Exception as e:
+                log.warning("관심학생 전송 실패 %s: %s", chat_id, e)
 
 
 # ── 실행 ──────────────────────────────────────────────────────

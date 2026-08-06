@@ -49,6 +49,9 @@ WD = ["월", "화", "수", "목", "금", "토", "일"]
 # 자동 전송(매일 미입력 요약·주간보고서). 기본 꺼짐 — 켜려면 MASTER_AUTO_SEND=1
 AUTO_SEND = (os.environ.get("MASTER_AUTO_SEND", "0").strip().lower()
              in ("1", "on", "true", "yes", "y"))
+# 일요일 저녁, 세 과목 합친 관심 학생을 마스터에게. 기본 켜짐 — 끄려면 MASTER_WEEKLY_CONCERN=0
+WEEKLY_CONCERN = (os.environ.get("MASTER_WEEKLY_CONCERN", "1").strip().lower()
+                  in ("1", "on", "true", "yes", "y"))
 
 # 표시이름 → (subjects.py 키, 데이터 폴더)
 SUBJECTS = {
@@ -682,16 +685,26 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── 자동 전송 (매일 미입력 요약 · 일요일 주간보고서) ────────────
-_last = {"daily": None, "weekly": None}
+_last = {"daily": None, "weekly": None, "concern": None}
 
 
 async def tick(context: ContextTypes.DEFAULT_TYPE):
-    if not AUTO_SEND:
-        return
     admin = master_admin()
     if admin is None:
         return
     now = datetime.datetime.now(KST)
+    dkey = now.date().isoformat()
+    # 일요일 18:00 — 세 과목 합친 관심 학생을 마스터에게 (자동전송과 별개, 기본 ON)
+    if (WEEKLY_CONCERN and now.weekday() == 6 and now.hour == 18
+            and now.minute < 3 and _last["concern"] != dkey):
+        _last["concern"] = dkey
+        try:
+            await send_long(context.bot, admin,
+                            concern_students("이번주", now.date()), parse_mode="HTML")
+        except Exception as e:
+            log.warning("주간 관심학생 실패: %s", e)
+    if not AUTO_SEND:
+        return
     hhmm = os.environ.get("MASTER_DAILY_HHMM", "21:30")
     try:
         dh, dm = map(int, hhmm.split(":"))
@@ -725,10 +738,10 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
-    if AUTO_SEND and app.job_queue:
+    if (AUTO_SEND or WEEKLY_CONCERN) and app.job_queue:
         app.job_queue.run_repeating(tick, interval=60, first=10)
-    log.info("마스터봇 시작 · 데이터 상위 폴더: %s · 자동전송: %s",
-             BASE, "ON" if AUTO_SEND else "OFF")
+    log.info("마스터봇 시작 · 데이터: %s · 자동전송: %s · 주간관심학생: %s",
+             BASE, "ON" if AUTO_SEND else "OFF", "ON" if WEEKLY_CONCERN else "OFF")
     app.run_polling()
 
 
