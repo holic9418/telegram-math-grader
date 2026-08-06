@@ -348,7 +348,7 @@ GUIDE = (
     "👑 <b>원장용 마스터봇</b> (조회 전용)\n\n"
     "• <b>현황</b> — 세 과목 미입력 반 한눈에\n"
     "• <b>수학 초5 이번주 미리보기</b> — 과목·반·기간 지정 출석표\n"
-    "• <b>수학 원서진</b> — 특정 학생 출결(그 학생 속한 반마다)\n"
+    "• <b>원서진</b> / <b>수학 원서진</b> — 특정 학생 출결(과목 생략 시 세 과목 전체에서 검색)\n"
     "• <b>국어 통계 이번주</b> — 출석률·결석·과제 미제출\n"
     "• <b>영어 주간보고서</b> / <b>주간보고서</b>(세 과목 전부)\n\n"
     "필요할 때 직접 물어보시면 돼요. (자동 전송은 꺼져 있어요)"
@@ -366,6 +366,26 @@ async def send_long(bot, chat_id, text, **kw):
                 chunk = text[:cut]
         await bot.send_message(chat_id, chunk, **kw)
         text = text[len(chunk):].lstrip("\n")
+
+
+async def send_student_views(update, context, label, dd, wb, name, sheets, rest, today):
+    """한 학생의 (반별) 출결표를 이미지로 보낸다. 보낸 장수 반환."""
+    sent = 0
+    for s in sheets:
+        enroll = enroll_of(dd).get(s, {})
+        dates = [d for d in period_dates(wb, s, rest, today, default="month")
+                 if ac.find_date_block(wb[s], d) is not None
+                 and ac.student_active(enroll, name, d)]
+        if not dates:
+            continue
+        img = rpt.render_student_table(name, wb[s], dates)
+        if img is None:
+            continue
+        bio = io.BytesIO(); img.save(bio, "PNG"); bio.seek(0)
+        await update.message.reply_photo(
+            photo=bio, caption=f"📷 {label} · {name} · {s} ({dates[0]}~{dates[-1]})")
+        sent += 1
+    return sent
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -454,24 +474,26 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await update.message.reply_text(
                 f"[{label}] 반이나 학생을 못 찾았어요. 반 목록: " + ", ".join(wb.sheetnames))
         await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
-        sent = 0
-        for s in sheets:
-            enroll = enroll_of(dd).get(s, {})
-            dates = [d for d in period_dates(wb, s, rest, today, default="month")
-                     if ac.find_date_block(wb[s], d) is not None
-                     and ac.student_active(enroll, name, d)]
-            if not dates:
-                continue
-            img = rpt.render_student_table(name, wb[s], dates)
-            if img is None:
-                continue
-            bio = io.BytesIO(); img.save(bio, "PNG"); bio.seek(0)
-            await update.message.reply_photo(
-                photo=bio, caption=f"📷 {label} · {name} · {s} ({dates[0]}~{dates[-1]})")
-            sent += 1
+        sent = await send_student_views(update, context, label, dd, wb, name, sheets, rest, today)
         if not sent:
             return await update.message.reply_text(f"[{label}] {name} 학생의 해당 기간 수업일이 없어요.")
         return
+
+    # 과목 미지정 — 이름만/‘현황 이름’이면 세 과목 전체에서 그 학생을 찾아 보여준다
+    q = re.sub(r"현황|미입력현황|미입력|전체현황|미리보기|조회|보여줘|보여주세요", " ", low).strip()
+    if q:
+        await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+        total = 0
+        for lb in SUBJECTS:
+            p = latest_file(sdir(lb))
+            if not p:
+                continue
+            wb = ac.load_workbook(p)
+            name, sheets = find_student(q, wb)
+            if name:
+                total += await send_student_views(update, context, lb, sdir(lb), wb, name, sheets, q, today)
+        if total:
+            return
 
     await update.message.reply_text("무슨 말인지 잘 모르겠어요.\n" + GUIDE, parse_mode="HTML")
 
