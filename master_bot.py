@@ -45,6 +45,9 @@ BASE = os.environ.get("MASTER_DATA_BASE") or os.path.dirname(os.path.abspath(__f
 KST = ZoneInfo("Asia/Seoul")
 BACKLOG_SINCE = datetime.date(2026, 7, 13)   # 이 날짜 이전 옛 미입력은 무시
 WD = ["월", "화", "수", "목", "금", "토", "일"]
+# 자동 전송(매일 미입력 요약·주간보고서). 기본 꺼짐 — 켜려면 MASTER_AUTO_SEND=1
+AUTO_SEND = (os.environ.get("MASTER_AUTO_SEND", "0").strip().lower()
+             in ("1", "on", "true", "yes", "y"))
 
 # 표시이름 → (subjects.py 키, 데이터 폴더)
 SUBJECTS = {
@@ -331,7 +334,7 @@ GUIDE = (
     "• <b>수학 초5 이번주 미리보기</b> — 과목·반·기간 지정 출석표\n"
     "• <b>국어 통계 이번주</b> — 출석률·결석·과제 미제출\n"
     "• <b>영어 주간보고서</b> / <b>주간보고서</b>(세 과목 전부)\n\n"
-    "매일 저녁 미입력 요약과 일요일 주간보고서는 자동으로 보내드려요."
+    "필요할 때 직접 물어보시면 돼요. (자동 전송은 꺼져 있어요)"
 )
 
 
@@ -439,6 +442,8 @@ _last = {"daily": None, "weekly": None}
 
 
 async def tick(context: ContextTypes.DEFAULT_TYPE):
+    if not AUTO_SEND:
+        return
     admin = master_admin()
     if admin is None:
         return
@@ -476,9 +481,10 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
-    if app.job_queue:
+    if AUTO_SEND and app.job_queue:
         app.job_queue.run_repeating(tick, interval=60, first=10)
-    log.info("마스터봇 시작 · 데이터 상위 폴더: %s", BASE)
+    log.info("마스터봇 시작 · 데이터 상위 폴더: %s · 자동전송: %s",
+             BASE, "ON" if AUTO_SEND else "OFF")
     app.run_polling()
 
 
