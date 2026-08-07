@@ -1717,13 +1717,14 @@ async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:  # 현재 담당 현황
         mine = sorted(c for c, ids in teachers.items() if chat_id in ids)
         lines = ["👤 내가 담당하는 반: " + (", ".join(mine) if mine else "없음")]
-        if teachers:
+        assigned = {c: ids for c, ids in teachers.items() if ids}
+        if assigned:
             lines.append("\n전체 담당 현황:")
-            for c in sorted(teachers):
-                lines.append(f"• {c}: {len(teachers[c])}명 담당")
-            unassigned = sorted(known - set(teachers))
-            if unassigned:
-                lines.append("\n담당 미지정(알림 안 감): " + ", ".join(unassigned))
+            for c in sorted(assigned):
+                lines.append(f"• {c}: {len(assigned[c])}명 담당")
+        unassigned = sorted(known - set(assigned))   # 담당 없을 때도 반 목록은 보여줌
+        if unassigned:
+            lines.append("\n담당 미지정(알림 안 감): " + ", ".join(unassigned))
         lines.append("\n지정) 담당 초5 중2    해제) 담당 초5 빼기    전체해제) 담당 해제")
         await update.message.reply_text("\n".join(lines))
         return
