@@ -596,7 +596,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = (update.message.text or "").strip()
-    low = text.lstrip("/").strip().replace("지크", "zec")   # 영어 'zec'반 별칭
+    low = ac.normalize_grades(text.lstrip("/").strip().replace("지크", "zec"))   # 별칭·학년 정규화
 
     admin = master_admin()
     if low in ("관리자등록", "관리자 등록", "관리자"):

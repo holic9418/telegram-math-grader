@@ -60,11 +60,11 @@ log.info("과목: %s (%s)", SUBJECT, SUBJ_NAME)
 
 
 def apply_aliases(s):
-    """반 별칭을 시트명 표기로 치환 (예: '지크반'→'zec반'). 과목별 aliases 기준."""
+    """반 별칭·학년 표현을 시트명 표기로 치환 (예: '지크반'→'zec반', '6학년'→'초6')."""
     for k, v in SUBJ_ALIASES.items():
         if k in s:
             s = s.replace(k, v)
-    return s
+    return ac.normalize_grades(s)
 # 저장 폴더 우선순위: DATA_DIR > Railway 볼륨 자동경로 > 로컬 ./data
 DATA_DIR = (
     os.environ.get("DATA_DIR")

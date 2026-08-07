@@ -157,6 +157,11 @@ def resolve_rel_date(text, today):
     return None
 
 
+def normalize_grades(text):
+    """'4학년'/'5학년'/'6학년' → '초4'/'초5'/'초6' (이 학년은 초등부만 있어 명확)."""
+    return re.sub(r'([456])\s*학년', r'초\1', str(text))
+
+
 def is_this_week(t):
     return any(k in str(t) for k in ("이번주", "금주", "이번 주"))
 
