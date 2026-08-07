@@ -2946,12 +2946,7 @@ async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
         if wb is not None and cls in wb.sheetnames:
             recorded = ac.attendance_recorded(wb[cls], date_str)
         if recorded is False:  # 블록은 있는데 출석이 비어 있음 → 입력 안 함
-            # 담당 지정이 하나라도 있으면 그 반 담당에게만(미지정=발송 안 함),
-            # 아직 담당을 아무도 안 정했으면 전체에게(초기 편의)
-            if teachers:
-                recipients = teachers.get(cls, [])
-            else:
-                recipients = known_chats()
+            recipients = teachers.get(cls, [])   # 그 반 담당에게만 (미지정이면 알림 안 감)
             for chat_id in recipients:
                 try:
                     await context.bot.send_message(
@@ -3032,7 +3027,7 @@ async def backlog_job(context: ContextTypes.DEFAULT_TYPE):
         return
     teachers = load_teachers()
     for cls, dates in backlog.items():
-        recipients = (teachers.get(cls, []) if teachers else known_chats())
+        recipients = teachers.get(cls, [])   # 그 반 담당에게만 (미지정이면 알림 안 감)
         ktxt = ", ".join(f"{int(x.split('/')[0])}월 {int(x.split('/')[1])}일" for x in dates)
         msg = f"📌 {cls} · 아직 출석 입력이 안 된 날이 있어요: {ktxt}\n출석부를 입력해주세요!"
         for chat_id in recipients:
