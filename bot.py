@@ -1719,9 +1719,15 @@ async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = ["👤 내가 담당하는 반: " + (", ".join(mine) if mine else "없음")]
         assigned = {c: ids for c, ids in teachers.items() if ids}
         if assigned:
+            mem, adm = load_members(), load_admins()
+
+            def _nm(cid):   # chat_id → 이름
+                s = str(cid)
+                return (mem.get(s, {}).get("name") or adm.get(s, {}).get("name")
+                        or ("마스터" if cid == get_master() else s))
             lines.append("\n전체 담당 현황:")
             for c in sorted(assigned):
-                lines.append(f"• {c}: {len(assigned[c])}명 담당")
+                lines.append(f"• {c}: {', '.join(_nm(i) for i in assigned[c])}")
         unassigned = sorted(known - set(assigned))   # 담당 없을 때도 반 목록은 보여줌
         if unassigned:
             lines.append("\n담당 미지정(알림 안 감): " + ", ".join(unassigned))
