@@ -1706,13 +1706,16 @@ async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
     teachers = load_teachers()
     known = set(load_times()) | set(load_schedules())
 
-    # 인자 분류: 반이름들 + 해제 여부
-    remove, classes = False, []
-    for tok in context.args:
-        if tok in ("해제", "빼기", "제거", "삭제", "off", "취소"):
-            remove = True
-        else:
-            classes.append(tok)
+    # 인자 분류: 해제 여부 + 반이름 추출('중3 입시'처럼 공백 든 이름도 인식, 긴 이름 우선)
+    _rmw = ("해제", "빼기", "제거", "삭제", "off", "취소")
+    remove = any(t in _rmw for t in context.args)
+    _left = "".join(t for t in context.args if t not in _rmw)
+    classes = []
+    for c in sorted(known, key=lambda x: len(x.replace(" ", "")), reverse=True):
+        cn = c.replace(" ", "")
+        if cn and cn in _left:
+            classes.append(c)
+            _left = _left.replace(cn, "", 1)
 
     if not context.args:  # 현재 담당 현황
         mine = sorted(c for c, ids in teachers.items() if chat_id in ids)
@@ -1745,10 +1748,9 @@ async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ 모든 담당 반에서 빠졌어요. 이제 알림을 받지 않습니다.")
         return
 
-    unknown = [c for c in classes if c not in known]
-    if unknown:
+    if not classes:   # 반을 하나도 못 알아들음
         await update.message.reply_text(
-            f"'{', '.join(unknown)}' 반을 못 찾겠어요.\n등록된 반: {', '.join(sorted(known))}"
+            f"반을 못 찾겠어요. (붙여서 말고 그대로 적어주세요)\n등록된 반: {', '.join(sorted(known))}"
         )
         return
 
