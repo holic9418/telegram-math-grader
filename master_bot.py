@@ -692,12 +692,35 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await update.message.reply_text(f"[{label}] {name} 학생의 해당 기간 수업일이 없어요.")
         return
 
-    # 과목 미지정 — 이름만/‘현황 이름’이면 세 과목 전체에서 그 학생을 찾아 보여준다
+    # 과목 미지정 — '반+날짜'면 그 반이 있는 과목마다, 아니면 학생을 세 과목에서 찾아
     q = re.sub(r"현황|미입력현황|미입력|전체현황|미리보기|조회|보여줘|보여주세요", " ", low).strip()
     if q:
         await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
         total = 0
-        for lb in SUBJECTS:
+        has_period = (ac.is_this_week(q) or ac.is_last_week(q)
+                      or ac.resolve_rel_date(q, today) is not None)
+        if has_period:                      # 1) 반 미리보기 (반+날짜)
+            for lb in SUBJECTS:
+                p = latest_file(sdir(lb))
+                if not p:
+                    continue
+                wb = ac.load_workbook(p)
+                sheet = match_sheet(q, wb.sheetnames)
+                if not sheet:
+                    continue
+                dates = [d for d in period_dates(wb, sheet, q, today)
+                         if ac.find_date_block(wb[sheet], d) is not None]
+                if not dates:
+                    continue
+                apply_theme(lb)
+                img = rpt.render_class_table(sheet, wb[sheet], dates)
+                bio = io.BytesIO(); img.save(bio, "PNG"); bio.seek(0)
+                await update.message.reply_photo(
+                    photo=bio, caption=f"📷 {lb} · {sheet} ({dates[0]}~{dates[-1]})")
+                total += 1
+            if total:
+                return
+        for lb in SUBJECTS:                 # 2) 학생 조회
             p = latest_file(sdir(lb))
             if not p:
                 continue
