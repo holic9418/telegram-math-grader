@@ -127,9 +127,12 @@ def render_student_table(name, ws, dates, scale=2):
             for h in ('출석', '과제수행', '비고'):
                 c = ws.cell(top + ac.ROW_OFFSET[h], col)
                 vals[h] = (c.value, _cell_color(c))
-            for h in ('수업내용', '다음과제'):
-                c = ws.cell(top + ac.ROW_OFFSET[h], ac.STUDENT_FIRST_COL)
-                vals[h] = (c.value, BLACK)
+            for h in ('수업내용', '다음과제'):   # 학생 본인 칸의 실효값(병합 앵커) — 첫 학생 결석 시 빈칸 방지
+                rr = top + ac.ROW_OFFSET[h]
+                rng = next((g for g in ws.merged_cells.ranges
+                            if g.min_row <= rr <= g.max_row and g.min_col <= col <= g.max_col), None)
+                v = ws.cell(rng.min_row, rng.min_col).value if rng else ws.cell(rr, col).value
+                vals[h] = (v, BLACK)
         rows.append((d, vals))
 
     headers = ['날짜'] + STUDENT_COLS
