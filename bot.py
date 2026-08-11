@@ -17,6 +17,7 @@
 import os
 import io
 import re
+import html
 import json
 import logging
 import datetime
@@ -728,8 +729,11 @@ def build_preview(wb, parsed):
         ds = ", ".join(ac.sheet_dates(wb)[sheet])
         return None, f"{sheet}에 '{date}' 수업일이 없어요.\n가능한 날짜: {ds}"
 
+    def e(s):   # HTML 특수문자(<,>,&) 이스케이프 — 사용자 입력에 '<...>' 있어도 안 깨지게
+        return html.escape(str(s))
+
     roster = set(ac.get_roster(ws).keys())
-    lines = [f"📋 <b>{sheet}</b> · <b>{date}</b> 에 이렇게 기록할게요:"]
+    lines = [f"📋 <b>{e(sheet)}</b> · <b>{e(date)}</b> 에 이렇게 기록할게요:"]
     warnings = []
 
     att = parsed.get("출석") or {}
@@ -737,61 +741,61 @@ def build_preview(wb, parsed):
     if att:
         parts = []
         for name, val in att.items():
-            parts.append(f"{name} {val}")
+            parts.append(f"{e(name)} {e(val)}")
             if ac.nfc(name) not in roster:
                 warnings.append(name)
         lines.append("• 출석: " + ", ".join(parts))
     lc = parsed.get("수업내용")
     if isinstance(lc, str) and lc.strip():
-        lines.append(f"• 수업내용: {lc}")
+        lines.append(f"• 수업내용: {e(lc)}")
     elif isinstance(lc, dict) and lc:
         d = dict(lc)
         default = None
         for k in ("나머지", "그외", "그 외", "기타", "전체", "기본", "공통"):
             if k in d:
                 default = d.pop(k); break
-        detail = ", ".join(f"{s}: {v}" for s, v in d.items())
-        lines.append("• 수업내용: " + detail + (f" / 나머지: {default}" if default else ""))
+        detail = ", ".join(f"{e(s)}: {e(v)}" for s, v in d.items())
+        lines.append("• 수업내용: " + detail + (f" / 나머지: {e(default)}" if default else ""))
     hw = parsed.get("과제수행") or {}
     if hw:
         shown = {n: v for n, v in hw.items() if n not in absent}
         if shown:
-            lines.append("• 과제수행: " + ", ".join(f"{n} {v}" for n, v in shown.items()))
+            lines.append("• 과제수행: " + ", ".join(f"{e(n)} {e(v)}" for n, v in shown.items()))
         warnings += [n for n in hw if ac.nfc(n) not in roster]
     nq = parsed.get("다음과제")
     if isinstance(nq, str) and nq.strip():
-        lines.append(f"• 다음과제: {nq}")
+        lines.append(f"• 다음과제: {e(nq)}")
     elif isinstance(nq, dict) and nq:
         d = dict(nq)
         default = None
         for k in ("나머지", "그외", "그 외", "기타", "전체", "기본"):
             if k in d:
                 default = d.pop(k); break
-        detail = ", ".join(f"{s}: {v}" for s, v in d.items())
-        line = "• 다음과제: " + detail + (f" / 나머지: {default}" if default else "")
+        detail = ", ".join(f"{e(s)}: {e(v)}" for s, v in d.items())
+        line = "• 다음과제: " + detail + (f" / 나머지: {e(default)}" if default else "")
         lines.append(line)
         warnings += [n for n in d if ac.nfc(n) not in roster]
     bg_label = (parsed.get("비고라벨") or "비고").strip()
     if parsed.get("비고라벨"):
-        lines.append(f"• 비고 칸 이름 → <b>{bg_label}</b> 으로 변경")
+        lines.append(f"• 비고 칸 이름 → <b>{e(bg_label)}</b> 으로 변경")
     bg = parsed.get("비고") or {}
     if isinstance(bg, dict) and bg:
         shown_bg = {n: v for n, v in bg.items() if n not in absent}
         if shown_bg:
-            lines.append(f"• {bg_label}: " + ", ".join(f"{n}: {v}" for n, v in shown_bg.items()))
+            lines.append(f"• {e(bg_label)}: " + ", ".join(f"{e(n)}: {e(v)}" for n, v in shown_bg.items()))
         warnings += [n for n in bg if ac.nfc(n) not in roster]
     if absent:
-        lines.append(f"• 결석: {', '.join(sorted(absent))} → 과제수행·비고는 비워둡니다.")
+        lines.append(f"• 결석: {e(', '.join(sorted(absent)))} → 입력 없으면 과제·비고 빗금 처리.")
 
     life = parsed.get("학적") or {}
     if isinstance(life, dict) and life:
         desc = {"신규등록": "신규등록·명단 추가", "전입": "담당변경(전입)·명단 추가",
                 "퇴원": "퇴원·이후 빈칸", "전출": "담당변경(전출)·이후 빈칸"}
-        lines.append("• 학적: " + ", ".join(f"{n} → {desc.get(v, v)}" for n, v in life.items()))
+        lines.append("• 학적: " + ", ".join(f"{e(n)} → {desc.get(v, e(v))}" for n, v in life.items()))
 
     missing = sorted(w for w in set(warnings) if w not in life)
     if missing:
-        lines.append("\n⚠️ 명단에 없는 이름: " + ", ".join(missing) + " (그대로 두면 무시됩니다)")
+        lines.append("\n⚠️ 명단에 없는 이름: " + e(", ".join(missing)) + " (그대로 두면 무시됩니다)")
     lines.append("\n맞으면 <b>확인</b>, 아니면 <b>취소</b> 라고 보내주세요.")
     return "\n".join(lines), None
 
