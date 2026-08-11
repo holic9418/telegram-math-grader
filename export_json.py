@@ -57,6 +57,33 @@ def latest_file(dd):
     return os.path.join(dd, best), f"{bestkey[0]:02d}.{bestkey[1]:02d}"
 
 
+def _data_json(dd, name):
+    """data 폴더의 설정 json 읽기 (없으면 None)."""
+    p = os.path.join(dd, name)
+    if os.path.exists(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+    return None
+
+
+def subject_timetable(key, dd):
+    """과목 시간표 {반: {days:[요일idx], hours:{요일:'HH:MM~HH:MM'}, alarm:{요일:'HH:MM'}}}.
+    data 폴더 설정(있으면) 우선, 없으면 subjects.py 기본값."""
+    conf = subjects.get(key)
+    scheds = _data_json(dd, "schedules.json") or conf.get("schedules", {})
+    hours = _data_json(dd, "class_hours.json") or conf.get("hours", {})
+    times = _data_json(dd, "class_times.json") or conf.get("times", {})
+    tt = {}
+    for c, days in scheds.items():
+        tt[c] = {"days": list(days),
+                 "hours": hours.get(c, {}),
+                 "alarm": times.get(c, {})}
+    return tt
+
+
 def _merge_anchor(ws):
     """병합 셀의 각 좌표 → (앵커행, 앵커열). 병합 안이면 앵커값을 쓰기 위함."""
     out = {}
@@ -77,6 +104,7 @@ def export_subject(key, dd):
         "display": subjects.get(key)["display"],
         "month": month,
         "updated": datetime.datetime.now(KST).isoformat(timespec="seconds"),
+        "timetable": subject_timetable(key, dd),
         "classes": {},
     }
     for s in wb.sheetnames:
