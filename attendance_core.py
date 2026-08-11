@@ -1176,15 +1176,22 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
         st for st, val in _norm_keys(data.get('출석') or {}).items()
         if st in roster and st not in life and is_absent(val)
     }
+    _hw_in = _norm_keys(data.get('과제수행') or {})
+    _rmk_in = _norm_keys(data.get('비고') or {})
+
+    def _absent_has(label, st):   # 결석생에게 그 항목 입력값이 있나
+        return (_hw_in if label == '과제수행' else _rmk_in).get(st) not in (None, '')
     for st in absent:
         for label in ('과제수행', '비고'):
+            if _absent_has(label, st):
+                continue           # 입력값 있으면 그대로 두고 아래서 기록(빗금 안 함)
             cell = ws.cell(top + ROW_OFFSET[label], roster[st])
             if isinstance(cell, MergedCell):
                 continue
             cell.value = None
             _apply_font_color(cell, COLOR_BLACK)
             if label == '과제수행':
-                _set_diagonal(cell)    # 결석생 과제 칸은 빗금 처리
+                _set_diagonal(cell)    # 입력 없는 결석생 과제 칸은 빗금
             else:
                 _strip_diagonal(cell)
 
@@ -1223,7 +1230,9 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
                 if st in life:
                     continue  # 학적 표시로 이미 처리한 학생
                 if label in ('과제수행', '비고') and st in absent:
-                    continue  # 결석 학생의 과제·비고는 위에서 비웠으므로 건너뜀
+                    if val in (None, ''):
+                        continue   # 입력값 없으면 위에서 빗금 처리한 그대로
+                    _strip_diagonal(ws.cell(top + ROW_OFFSET[label], roster[st]))  # 값 있으면 빗금 지우고 기록
                 if st in roster and not student_active(enroll, st, date_str):
                     if label == '출석':
                         warnings.append(f"{st}: 재적 기간이 아니라 건너뜀")
@@ -1340,10 +1349,16 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
             cell = ws.cell(rq, col)
             if isinstance(cell, MergedCell):
                 continue
-            if st in absent:                    # 결석생: 다음과제 칸 빗금
-                cell.value = None
-                _apply_font_color(cell, COLOR_BLACK)
-                _set_diagonal(cell)
+            if st in absent:                    # 결석생: 입력값 있으면 기록, 없으면 빗금
+                exp = nqn.get(st)
+                if exp not in (None, ''):
+                    _strip_diagonal(cell)
+                    cell.value = exp
+                    cnt += 1
+                else:
+                    cell.value = None
+                    _apply_font_color(cell, COLOR_BLACK)
+                    _set_diagonal(cell)
                 continue
             _strip_diagonal(cell)               # 출석생: 재입력 대비 빗금 제거
             val = nqn.get(st)                    # 학생명 지정 최우선
