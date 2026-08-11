@@ -3450,6 +3450,17 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
+    async def on_error(update, context):   # 오류 나도 무응답 대신 안내 (조용히 죽지 않게)
+        log.error("처리 중 오류", exc_info=context.error)
+        try:
+            if isinstance(update, Update) and update.effective_chat:
+                await context.bot.send_message(
+                    update.effective_chat.id,
+                    "⚠️ 처리 중 오류가 났어요. 잠시 후 다시 하거나 다른 표현으로 해주세요.")
+        except Exception:
+            pass
+    app.add_error_handler(on_error)
+
     if app.job_queue is not None:
         # 매일 확인 + 시작 직후 1회 확인 (달이 바뀌면 새 파일 생성)
         app.job_queue.run_daily(monthly_job, time=datetime.time(0, 5))

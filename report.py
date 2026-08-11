@@ -107,8 +107,8 @@ def render_student_table(name, ws, dates, scale=2):
     fnt = _font(15 * scale)
     tmp = Image.new("RGB", (10, 10)); md = ImageDraw.Draw(tmp)
 
-    def tw(s):
-        return md.textlength(str(s), font=fnt)
+    def tw(s):   # 줄바꿈 있으면 가장 긴 줄 폭 (PIL은 멀티라인 측정 불가)
+        return max((md.textlength(ln, font=fnt) for ln in str(s).split("\n")), default=0.0)
 
     pad = 8 * scale
     caps = {'수업내용': 260 * scale, '다음과제': 200 * scale}
@@ -216,8 +216,8 @@ def render_class_table(cls_name, ws, dates, scale=2, keep=None, ws_by_date=None)
     fnt = _font(15 * scale)
     tmp = Image.new("RGB", (10, 10)); md = ImageDraw.Draw(tmp)
 
-    def tw(s):
-        return md.textlength(str(s), font=fnt)
+    def tw(s):   # 줄바꿈 있으면 가장 긴 줄 폭 (PIL은 멀티라인 측정 불가)
+        return max((md.textlength(ln, font=fnt) for ln in str(s).split("\n")), default=0.0)
 
     pad = 8 * scale
     asc, desc = fnt.getmetrics()

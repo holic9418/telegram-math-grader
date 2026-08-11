@@ -788,6 +788,16 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
+
+    async def on_error(update, context):
+        log.error("처리 중 오류", exc_info=context.error)
+        try:
+            if isinstance(update, Update) and update.effective_chat:
+                await context.bot.send_message(
+                    update.effective_chat.id, "⚠️ 처리 중 오류가 났어요. 다시 시도해 주세요.")
+        except Exception:
+            pass
+    app.add_error_handler(on_error)
     if (AUTO_SEND or WEEKLY_CONCERN) and app.job_queue:
         app.job_queue.run_repeating(tick, interval=60, first=10)
     log.info("마스터봇 시작 · 데이터: %s · 자동전송: %s · 주간관심학생: %s",
