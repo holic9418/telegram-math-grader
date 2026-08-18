@@ -856,6 +856,7 @@ GUIDE = f"""📋 <b>{SUBJ_NAME} 출석부 봇 사용법</b>
 
 • <b>휴강</b>: <code>7/20 휴강</code> · 사유 <code>8/17 휴강(대체공휴일)</code> · 기간 <code>8/18~8/22 휴강(학원방학)</code> · 취소 <code>8/17 휴강취소</code>
    → 이 과목의 그날 수업 있는 반 전부 빨간 '휴강'으로 (알림도 안 가요). 기간이면 그 기간 수업일 모두.
+   → <b>반별</b>은 반을 앞에 붙여요: <code>중3 8/17 휴강</code> · <code>초5 8/18~8/22 휴강(개인사정)</code> · <code>중3 8/17 휴강취소</code>
 • <b>개강 / 종강</b>: <code>고3B 신규개강</code> / <code>고3B 종강</code> (반 자체를 만들거나 종료)
    → 개강 때 받은 수업 시간이 <b>시간표에 자동 추가</b>, 종강하면 그 주까지만 뜨고 <b>다음 주부터 빠져요</b>
    ※ 학생 한 명은 <b>신규등록</b> · <b>퇴원</b> 으로
@@ -2481,10 +2482,22 @@ def _holiday_span_str(dates):
     return f"{a.month}/{a.day}~{b.month}/{b.day}"
 
 
+def _split_class_dates(before, today):
+    """'중3 8/17'·'중3 입시 8/18~8/22' → (반이름|None, [date,...]).
+    날짜는 뒤쪽에 오고 앞은 반 이름. 날짜를 못 찾으면 (None, None)."""
+    toks = before.split()
+    for k in range(min(3, len(toks)), 0, -1):     # 긴 날짜부(공백 낀 범위)부터 시도
+        ds = _holiday_dates(" ".join(toks[-k:]), today)
+        if ds is not None:
+            return (" ".join(toks[:-k]).strip() or None), ds
+    return None, None
+
+
 def parse_holiday_cmd(text, today):
-    """휴강 명령 파싱. 반환 {'cancel','dates':[date,...],'reason'} 또는 None.
+    """휴강 명령 파싱. 반환 {'cancel','dates':[date,...],'reason','class'} 또는 None.
     지원: '8/17 휴강', '8/17일 휴강(대체공휴일)', '8/18~8/22 휴강(학원방학)',
-          '7/20 휴강 폭우', '8/17 휴강취소', '8/18~8/22 휴강취소', '오늘 휴강', '휴강 8/17'.
+          '7/20 휴강 폭우', '8/17 휴강취소', '오늘 휴강', '휴강 8/17',
+          반별: '중3 8/17 휴강', '초5 8/18~8/22 휴강(개인사정)'.
     'dates'가 []면 날짜 없는 '휴강' → 도움말용. None이면 휴강 명령이 아님(다른 처리로)."""
     s = str(text).strip()
     m = re.search(r"휴강", s)
@@ -2500,27 +2513,31 @@ def parse_holiday_cmd(text, today):
     if not cancel and before and after:          # 날짜가 앞, 뒤는 사유
         mr = re.match(r"^[\(（]\s*(.*?)\s*[\)）]$", after)   # (대체공휴일) 형태
         reason = (mr.group(1).strip() if mr else after.strip()) or None
-    datepart = before if before else after       # '8/17 휴강' 또는 '휴강 8/17'
-    dates = _holiday_dates(datepart, today)
+    cls_hint = None
+    if before:                                    # '중3 8/17 휴강' / '8/17 휴강'
+        cls_hint, dates = _split_class_dates(before, today)
+    else:                                         # '휴강 8/17' (동사 먼저 — 반 없음)
+        dates = _holiday_dates(after, today)
     if dates is None:
-        if datepart == "":                        # 그냥 '휴강' → 도움말
-            return {"cancel": cancel, "dates": [], "reason": None}
+        if (before or after) == "":               # 그냥 '휴강' → 도움말
+            return {"cancel": cancel, "dates": [], "reason": None, "class": None}
         return None                               # 휴강은 있으나 날짜 형식이 아님
-    return {"cancel": cancel, "dates": dates, "reason": reason}
+    return {"cancel": cancel, "dates": dates, "reason": reason, "class": cls_hint}
 
 
-async def start_holiday(update: Update, context: ContextTypes.DEFAULT_TYPE, dates, reason=None):
-    """주어진 날짜(들)에 수업이 있는 이 과목의 모든 반을 휴강으로 지정 — 확인 후 적용.
-    dates: date 객체 리스트(단일 또는 기간)."""
+async def start_holiday(update: Update, context: ContextTypes.DEFAULT_TYPE, dates, reason=None, only=None):
+    """주어진 날짜(들)에 수업이 있는 반을 휴강으로 지정 — 확인 후 적용.
+    dates: date 객체 리스트(단일 또는 기간). only: 특정 시트명이면 그 반만."""
     chat_id = update.effective_chat.id
     wb, path = load_current_wb()
     if wb is None:
         await update.message.reply_text("이번 달 출석부가 아직 없어요.")
         return
+    scope = [only] if only else wb.sheetnames
     date_strs = [f"{d.month}/{d.day}" for d in dates]
     targets, already, has_data = [], 0, set()
     for ds in date_strs:
-        for sheet in wb.sheetnames:
+        for sheet in scope:
             ws = wb[sheet]
             top = ac.find_date_block(ws, ds)
             if top is None:
@@ -2533,8 +2550,10 @@ async def start_holiday(update: Update, context: ContextTypes.DEFAULT_TYPE, date
             if ac.block_has_data(ws, top, last_col):
                 has_data.add(sheet)
     span = _holiday_span_str(dates)
+    who = f"{html.escape(only)} 은 " if only else ""
     if not targets:
-        msg = (f"<b>{span}</b> 은 이미 휴강이에요." if already
+        msg = (f"{who}<b>{span}</b> 은 이미 휴강이에요." if already
+               else f"{who}<b>{span}</b> 에 수업이 없어요." if only
                else f"<b>{span}</b> 에 수업 있는 반이 없어요.")
         await update.message.reply_text(msg, parse_mode="HTML")
         return
@@ -2581,16 +2600,18 @@ async def handle_holiday_confirm(update: Update, context: ContextTypes.DEFAULT_T
         parse_mode="HTML")
 
 
-async def undo_holiday(update: Update, context: ContextTypes.DEFAULT_TYPE, dates):
-    """휴강 지정을 되돌린다(단일/기간). 휴강 블록엔 기록이 없어 확인 없이 바로 처리."""
+async def undo_holiday(update: Update, context: ContextTypes.DEFAULT_TYPE, dates, only=None):
+    """휴강 지정을 되돌린다(단일/기간). 휴강 블록엔 기록이 없어 확인 없이 바로 처리.
+    only: 특정 시트명이면 그 반만."""
     wb, path = load_current_wb()
     if wb is None:
         await update.message.reply_text("이번 달 출석부가 아직 없어요.")
         return
+    scope = [only] if only else wb.sheetnames
     date_strs = [f"{d.month}/{d.day}" for d in dates]
     done, failed, sheets_done = 0, [], set()
     for ds in date_strs:
-        for sheet in wb.sheetnames:
+        for sheet in scope:
             ws = wb[sheet]
             top = ac.find_date_block(ws, ds)
             if top is None:
@@ -2665,9 +2686,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if low in ("점검", "정리", "날짜점검"):
         return await start_stray_check(update, context)
 
-    # 휴강 지정·취소 — 이 과목의 모든 반, 단일 날짜 또는 기간(범위) 지원
-    #   '8/17 휴강', '8/17일 휴강(대체공휴일)', '8/18~8/22 휴강(학원방학)',
-    #   '7/20 휴강 폭우', '8/17 휴강취소', '8/18~8/22 휴강취소', '오늘 휴강'
+    # 휴강 지정·취소 — 단일 날짜 또는 기간(범위), 과목 전체 또는 특정 반
+    #   전체: '8/17 휴강(대체공휴일)', '8/18~8/22 휴강(학원방학)', '오늘 휴강'
+    #   반별: '중3 8/17 휴강', '초5 8/18~8/22 휴강(개인사정)', '중3 8/17 휴강취소'
     if "휴강" in text:
         hol = parse_holiday_cmd(text, datetime.datetime.now(KST).date())
         if hol is not None:
@@ -2675,12 +2696,30 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     "어느 날짜를 휴강으로 할까요?\n"
                     "예) <code>8/17 휴강</code> · 사유 <code>8/17 휴강(대체공휴일)</code> · "
-                    "기간 <code>8/18~8/22 휴강(학원방학)</code> · 취소 <code>8/17 휴강취소</code>",
+                    "기간 <code>8/18~8/22 휴강(학원방학)</code> · 반별 <code>중3 8/17 휴강</code> · "
+                    "취소 <code>8/17 휴강취소</code>",
                     parse_mode="HTML")
                 return
+            only = None
+            if hol["class"]:                        # 반을 지정했으면 그 반만
+                wbp, _ = load_current_wb()
+                sheets = wbp.sheetnames if wbp else []
+                cands = _match_preview_sheet(apply_aliases(hol["class"]), sheets)
+                if len(cands) == 1:
+                    only = cands[0]
+                elif not cands:
+                    await update.message.reply_text(
+                        f"'{html.escape(hol['class'])}' 반을 못 찾았어요. "
+                        f"(반: {html.escape(', '.join(sheets))})")
+                    return
+                else:
+                    await update.message.reply_text(
+                        f"반이 여러 개예요: {html.escape(', '.join(cands))}\n"
+                        "정확한 반 이름으로 다시 말해 주세요.")
+                    return
             if hol["cancel"]:
-                return await undo_holiday(update, context, hol["dates"])
-            return await start_holiday(update, context, hol["dates"], hol["reason"])
+                return await undo_holiday(update, context, hol["dates"], only)
+            return await start_holiday(update, context, hol["dates"], hol["reason"], only)
 
     # 신규개강 / 종강 트리거 (어순 무관: '고3B 신규개강' = '신규개강 고3B')
     mo = re.match(r"^(?:(?:신규개강|개강)\s+(.+)|(.+?)\s*(?:신규개강|개강))$", low)
