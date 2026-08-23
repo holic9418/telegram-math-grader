@@ -278,33 +278,94 @@ def admin_path():
     return os.path.join(DATA_DIR, "admin.json")
 
 
-def get_admin():
-    """마스터(최상위) chat_id. 환경변수 MASTER_CHAT_ID/ADMIN_CHAT_ID 우선, 없으면 admin.json.
-    (기존 admin.json = 마스터. 하위 '관리자'는 admins.json에서 관리)"""
-    for key in ("MASTER_CHAT_ID", "ADMIN_CHAT_ID"):
-        env = (os.environ.get(key) or "").strip()
-        if env.lstrip("-").isdigit():
-            return int(env)
+MAX_MASTERS = 2   # 마스터는 최대 2명까지
+
+
+def _read_admin_file():
+    """admin.json → 마스터 chat_id 리스트. 구형 {'chat_id':N}·신형 {'chat_ids':[...]} 모두 지원."""
     p = admin_path()
-    if os.path.exists(p):
+    if not os.path.exists(p):
+        return []
+    try:
         with open(p, encoding="utf-8") as f:
-            return json.load(f).get("chat_id")
-    return None
+            d = json.load(f)
+    except Exception:
+        return []
+    if isinstance(d.get("chat_ids"), list):
+        return [int(x) for x in d["chat_ids"] if str(x).lstrip("-").isdigit()]
+    if d.get("chat_id") is not None and str(d["chat_id"]).lstrip("-").isdigit():
+        return [int(d["chat_id"])]
+    return []
 
 
-def set_admin(chat_id):
+def get_masters():
+    """마스터(최상위) chat_id 목록 — 최대 2명.
+    환경변수 MASTER_CHAT_ID/ADMIN_CHAT_ID(쉼표·공백으로 최대 2개) 우선, 없으면 admin.json."""
+    for key in ("MASTER_CHAT_ID", "ADMIN_CHAT_ID"):
+        raw = (os.environ.get(key) or "").strip()
+        if raw:
+            ids = [int(t) for t in re.split(r"[,\s]+", raw) if t.lstrip("-").isdigit()]
+            if ids:
+                return ids[:MAX_MASTERS]
+    return _read_admin_file()[:MAX_MASTERS]
+
+
+def save_masters(ids):
+    """마스터 목록 저장(중복 제거·최대 2). admin.json에 신형 형식으로."""
+    uniq = list(dict.fromkeys(int(i) for i in ids))[:MAX_MASTERS]
     with open(admin_path(), "w", encoding="utf-8") as f:
-        json.dump({"chat_id": chat_id}, f)
+        json.dump({"chat_ids": uniq}, f)
+    return uniq
 
 
-# 마스터 = 최상위 1인. 관리자 = 마스터가 승인한 하위 권한(여러 명).
-get_master = get_admin
-set_master = set_admin
+def get_master():
+    """대표 마스터 1인(첫 번째). 단일 수신자·하위 호환용."""
+    ms = get_masters()
+    return ms[0] if ms else None
+
+
+get_admin = get_master        # 하위 호환 별칭
+
+
+def set_master(chat_id):
+    """단일 마스터로 설정(대체). 부트스트랩·마스터 넘기기용."""
+    save_masters([chat_id])
+
+
+def add_master(chat_id):
+    """마스터 추가. 반환 (ok, code): code ∈ {'ok','already','full'}."""
+    ms = get_masters()
+    if chat_id in ms:
+        return False, "already"
+    if len(ms) >= MAX_MASTERS:
+        return False, "full"
+    save_masters(ms + [chat_id])
+    return True, "ok"
+
+
+def remove_master(chat_id):
+    """마스터 해제(최소 1명은 남긴다). 반환 (ok, code): code ∈ {'ok','notmaster','last'}."""
+    ms = get_masters()
+    if chat_id not in ms:
+        return False, "notmaster"
+    if len(ms) <= 1:
+        return False, "last"
+    save_masters([i for i in ms if i != chat_id])
+    return True, "ok"
+
+
+def _master_env_warn():
+    """마스터가 환경변수로 고정돼 있으면 파일 변경이 안 먹는다는 경고(없으면 빈 문자열)."""
+    env = next((k for k in ("MASTER_CHAT_ID", "ADMIN_CHAT_ID")
+                if (os.environ.get(k) or "").strip()), None)
+    if not env:
+        return ""
+    return (f"\n\n⚠️ 지금 <code>{env}</code> 환경변수가 설정돼 있어 그게 우선이에요. "
+            "파일 지정이 반영되려면 그 환경변수를 비워주세요.")
 
 
 def is_master(chat_id):
-    m = get_master()
-    return m is not None and m == chat_id
+    return chat_id in get_masters()
 
 
 def admins_path():
@@ -873,7 +934,7 @@ GUIDE = f"""📋 <b>{SUBJ_NAME} 출석부 봇 사용법</b>
    → 입력: <code>원서진 1단원 유형서 수정완료</code> (X·취소도 됨)
    → 보기: <code>초5A 진도</code>(반 전체) · <code>원서진 진도</code>(개인) · 설정확인 <code>초5A 진도설정</code>
 • <b>권한</b>: 원장(<b>마스터</b>)이 최상위. 관리자가 되려면 <code>관리자 신청</code> → 마스터 승인 후 관리 기능 사용
-   → 마스터만: <code>관리자 승인 이름</code> · <code>관리자 박탈 이름</code> · <code>마스터 넘기기 이름</code>
+   → 마스터만: <code>관리자 승인 이름</code> · <code>관리자 박탈 이름</code> · <code>마스터 추가 이름</code>(최대 2명) · <code>마스터 넘기기 이름</code>
 
 ━━━━━━━━━━━━━━━
 궁금하면 아무 때나 <b>도움말</b> 보내면 이 안내가 다시 떠요. 🙂
@@ -1732,7 +1793,7 @@ async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
             def _nm(cid):   # chat_id → 이름
                 s = str(cid)
                 return (mem.get(s, {}).get("name") or adm.get(s, {}).get("name")
-                        or ("마스터" if cid == get_master() else s))
+                        or ("마스터" if is_master(cid) else s))
             lines.append("\n전체 담당 현황:")
             for c in sorted(assigned):
                 lines.append(f"• {c}: {', '.join(_nm(i) for i in assigned[c])}")
@@ -1806,17 +1867,26 @@ MASTER_HELP = (
     "👑 <b>마스터로 등록됐어요.</b> (최상위 · 모든 권한)\n\n"
     "• <b>관리자 승인</b> : 관리자 신청 목록 보기 / <b>관리자 승인 이름</b> : 승인\n"
     "• <b>관리자 박탈 이름</b> : 관리자 자격 회수\n"
+    "• <b>마스터 추가 이름</b> : 공동 마스터 지정(최대 2명) / <b>마스터 해제 이름</b> : 해제\n"
     "• <b>마스터 넘기기 이름</b> : 마스터 자리를 다른 사람에게\n"
     "• 그 외 승인 관리(<b>승인</b>·<b>박탈</b>·<b>멤버</b>), 주간보고서, 설정 등 전부"
 )
 
 
 async def _admin_status(update):
-    master = get_master()
+    masters = get_masters()
+    members = load_members()
     admins = load_admins()
+
+    def _who(cid):
+        nm = (members.get(str(cid), {}).get("name")
+              or admins.get(str(cid), {}).get("name"))
+        return f"{nm} (id {cid})" if nm else f"id {cid}"
+
     appr = [v["name"] for v in admins.values() if v.get("status") == "approved"]
     pend = [(k, v["name"]) for k, v in admins.items() if v.get("status") == "pending"]
-    lines = [f"👑 마스터: id {master}",
+    mtxt = " · ".join(_who(c) for c in masters) if masters else "없음"
+    lines = [f"👑 마스터({len(masters)}/{MAX_MASTERS}): {mtxt}",
              "🛡 관리자: " + (", ".join(appr) if appr else "없음")]
     if pend:
         lines.append("\n⏳ 관리자 신청 대기:")
@@ -1851,13 +1921,14 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admins[str(chat_id)] = {"name": name or "이름미상", "status": "pending"}
     save_admins(admins)
     await update.message.reply_text("🛡 관리자 신청을 마스터에게 보냈어요. 승인되면 알려드릴게요. ⏳")
-    try:
-        await context.bot.send_message(
-            master, f"🔔 <b>관리자 신청</b>: {name or '이름미상'} (id {chat_id})\n"
-            f"승인: <code>관리자 승인 {chat_id}</code>  ·  거절: <code>관리자 거절 {chat_id}</code>",
-            parse_mode="HTML")
-    except Exception as e:
-        log.warning("관리자 신청 알림 실패: %s", e)
+    for mid in get_masters():
+        try:
+            await context.bot.send_message(
+                mid, f"🔔 <b>관리자 신청</b>: {name or '이름미상'} (id {chat_id})\n"
+                f"승인: <code>관리자 승인 {chat_id}</code>  ·  거절: <code>관리자 거절 {chat_id}</code>",
+                parse_mode="HTML")
+        except Exception as e:
+            log.warning("관리자 신청 알림 실패: %s", e)
 
 
 async def cmd_admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1928,26 +1999,23 @@ async def cmd_transfer_admin(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "그분이 먼저 봇에 메시지를 보내게 해주세요.", parse_mode="HTML")
         return
     new_id = int(key)
-    if new_id == get_master():
+    if new_id in get_masters():
         await update.message.reply_text("이미 그분이 마스터예요. 👍")
         return
     if m[key].get("status") != "approved":     # 넘기는 김에 승인도 처리
         m[key]["status"] = "approved"
         save_members(m)
     old = update.effective_chat.id             # 넘긴 사람은 관리자로 남는다(멤버 강등 아님)
-    set_master(new_id)
+    # 본인 자리만 새 사람에게 넘기고, 공동 마스터가 있으면 그대로 둔다
+    save_masters([i for i in get_masters() if i != old] + [new_id])
     admins = load_admins()
     admins[str(old)] = {
         "name": (update.effective_user.full_name if update.effective_user else str(old)),
         "status": "approved"}
     save_admins(admins)
     name = m[key].get("name") or key
-    env = next((os.environ.get(k) or "" for k in ("MASTER_CHAT_ID", "ADMIN_CHAT_ID")
-                if (os.environ.get(k) or "").strip().lstrip("-").isdigit()), "")
-    warn = ("\n\n⚠️ 단, 지금 <code>MASTER_CHAT_ID</code>(또는 ADMIN_CHAT_ID) 환경변수가 설정돼 있어 그게 우선이에요. "
-            "완전히 넘기려면 그 환경변수를 지우거나 새 번호로 바꿔주세요.") if env else ""
     await update.message.reply_text(
-        f"✅ 마스터를 <b>{name}</b> 님께 넘겼어요. <b>본인은 관리자로 남습니다.</b>{warn}",
+        f"✅ 마스터를 <b>{name}</b> 님께 넘겼어요. <b>본인은 관리자로 남습니다.</b>{_master_env_warn()}",
         parse_mode="HTML")
     try:
         await context.bot.send_message(
@@ -1955,6 +2023,98 @@ async def cmd_transfer_admin(update: Update, context: ContextTypes.DEFAULT_TYPE)
             parse_mode="HTML")
     except Exception as e:
         log.warning("새 마스터 알림 실패: %s", e)
+
+
+async def cmd_add_master(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """마스터: 다른 멤버를 공동 마스터로 추가(최대 2명). 예) '마스터 추가 홍길동'"""
+    if not await require_master(update):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "누구를 마스터로 추가할지 이름/번호를 알려주세요. 예) <code>마스터 추가 홍길동</code>\n"
+            "(그분이 먼저 봇에 아무 메시지나 보내 <code>멤버</code> 목록에 떠 있어야 해요)",
+            parse_mode="HTML")
+        return
+    q = " ".join(context.args)
+    members, admins = load_members(), load_admins()
+    key = _find_member_key(members, q) or _find_member_key(admins, q)
+    if not key and q.strip().lstrip("-").isdigit():
+        key = q.strip()
+    if not key:
+        await update.message.reply_text(
+            "그런 멤버를 못 찾았어요. <code>멤버</code>로 명단을 확인하거나, "
+            "그분이 먼저 봇에 메시지를 보내게 해주세요.", parse_mode="HTML")
+        return
+    new_id = int(key)
+    ok, code = add_master(new_id)
+    if not ok:
+        if code == "already":
+            await update.message.reply_text("이미 마스터예요. 👍")
+        else:  # full
+            await update.message.reply_text(
+                f"마스터는 최대 {MAX_MASTERS}명까지예요. 먼저 <code>마스터 해제 이름</code>으로 "
+                "한 자리를 비워주세요.", parse_mode="HTML")
+        return
+    name = (members.get(key, {}).get("name")
+            or admins.get(key, {}).get("name") or key)
+    members.setdefault(key, {"name": name})["status"] = "approved"   # 사용 권한 보장
+    save_members(members)
+    if key in admins:                       # 마스터는 관리자보다 상위 — 관리자 목록에선 뺀다
+        admins.pop(key, None)
+        save_admins(admins)
+    await update.message.reply_text(
+        f"👑 <b>{html.escape(str(name))}</b> 님을 공동 마스터로 추가했어요. "
+        f"(현재 마스터 {len(get_masters())}/{MAX_MASTERS}명){_master_env_warn()}",
+        parse_mode="HTML")
+    try:
+        await context.bot.send_message(
+            new_id, "👑 <b>마스터로 지정됐어요.</b> 최상위 권한으로 모든 걸 관리할 수 있어요.",
+            parse_mode="HTML")
+    except Exception as e:
+        log.warning("새 마스터 알림 실패: %s", e)
+
+
+async def cmd_remove_master(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """마스터: 공동 마스터를 해제해 관리자로 강등. 최소 1명은 남는다. 예) '마스터 해제 홍길동'"""
+    if not await require_master(update):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "누구를 마스터에서 뺄지 이름/번호를 알려주세요. 예) <code>마스터 해제 홍길동</code>",
+            parse_mode="HTML")
+        return
+    q = " ".join(context.args)
+    members, admins = load_members(), load_admins()
+    key = _find_member_key(members, q) or _find_member_key(admins, q)
+    if not key and q.strip().lstrip("-").isdigit():
+        key = q.strip()
+    if not key:
+        await update.message.reply_text("그런 분을 못 찾았어요.")
+        return
+    target = int(key)
+    ok, code = remove_master(target)
+    if not ok:
+        if code == "notmaster":
+            await update.message.reply_text("그분은 마스터가 아니에요.")
+        else:  # last
+            await update.message.reply_text(
+                "마스터가 1명뿐이라 해제할 수 없어요. (최소 1명은 있어야 해요)\n"
+                "다른 사람에게 넘기려면 <code>마스터 넘기기 이름</code>을 쓰세요.",
+                parse_mode="HTML")
+        return
+    name = (members.get(key, {}).get("name")
+            or admins.get(key, {}).get("name") or key)
+    admins[key] = {"name": name, "status": "approved"}      # 관리자로 남긴다
+    save_admins(admins)
+    await update.message.reply_text(
+        f"✅ <b>{html.escape(str(name))}</b> 님을 마스터에서 해제했어요. "
+        f"(관리자로 남습니다 · 현재 마스터 {len(get_masters())}/{MAX_MASTERS}명){_master_env_warn()}",
+        parse_mode="HTML")
+    try:
+        await context.bot.send_message(
+            target, "마스터 권한이 해제됐어요. 관리자로 계속 관리하실 수 있어요.")
+    except Exception:
+        pass
 
 
 async def gate_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -1965,8 +2125,7 @@ async def gate_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> boo
     name = update.effective_user.full_name if update.effective_user else None
     newly = register_pending(chat_id, name)
     if newly:
-        admin = get_admin()
-        if admin:
+        for admin in get_masters():
             try:
                 await context.bot.send_message(
                     admin,
@@ -2331,8 +2490,9 @@ async def handle_opening_step(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"⚠️ 아직 <b>담당 선생님이 없어요.</b> 담당쌤이 <code>담당 {st['sheet']}</code> 라고 보내 지정해 주세요.",
             parse_mode="HTML",
         )
-        admin = get_admin()
-        if admin and admin != chat_id:
+        for admin in get_masters():
+            if admin == chat_id:
+                continue
             try:
                 await context.bot.send_message(
                     admin,
@@ -2822,6 +2982,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _a is not None:                       # '담당 초5A' = '초5A 담당'
         context.args = _a
         return await cmd_teacher(update, context)
+    _m = re.match(r'^마스터\s*(?:추가|지정|임명)\s*(.*)$', low)
+    if _m:                                     # '마스터 추가 홍길동' (공동 마스터)
+        context.args = _m.group(1).split()
+        return await cmd_add_master(update, context)
+    _m = re.match(r'^마스터\s*(?:해제|제외|빼기|내리기)\s*(.*)$', low)
+    if _m:                                     # '마스터 해제 홍길동'
+        context.args = _m.group(1).split()
+        return await cmd_remove_master(update, context)
     _m = re.match(r'^(?:마스터|관리자)\s*(?:넘기기|넘겨\S*|이전|위임)\s*(.*)$', low)
     if _m:                                     # '마스터 넘기기 홍길동'
         context.args = _m.group(1).split()
@@ -3510,8 +3678,10 @@ async def report_job(context: ContextTypes.DEFAULT_TYPE):
     if not out:
         log.info("주간 보고서: 이번 주 데이터 없음")
         return
-    to = get_admin() or get_report_to()  # 마스터에게(없으면 기존 수신자)
-    recipients = [to] if to else known_chats()
+    recipients = get_masters()            # 마스터(들)에게
+    if not recipients:
+        rt = get_report_to()
+        recipients = [rt] if rt else known_chats()
     for chat_id in recipients:
         try:
             with open(out, "rb") as f:
