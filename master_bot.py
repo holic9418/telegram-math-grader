@@ -524,22 +524,109 @@ def subject_weekly(label, today):
 
 
 # ── 권한 ───────────────────────────────────────────────────────
-def master_admin():
-    env = (os.environ.get("MASTER_CHAT_ID") or "").strip()
-    if env.lstrip("-").isdigit():
-        return int(env)
+MAX_MASTERS = 2   # 원장(마스터)은 최대 2명까지
+
+
+def _read_master_file():
+    """master_admin.json → chat_id 리스트. 구형 {'chat_id':N}·신형 {'chat_ids':[...]} 지원."""
     p = os.path.join(BASE, "master_admin.json")
-    if os.path.exists(p):
-        try:
-            return json.load(open(p, encoding="utf-8")).get("chat_id")
-        except Exception:
-            return None
-    return None
+    if not os.path.exists(p):
+        return []
+    try:
+        d = json.load(open(p, encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(d.get("chat_ids"), list):
+        return [int(x) for x in d["chat_ids"] if str(x).lstrip("-").isdigit()]
+    if d.get("chat_id") is not None and str(d["chat_id"]).lstrip("-").isdigit():
+        return [int(d["chat_id"])]
+    return []
+
+
+def master_admins():
+    """원장(마스터) chat_id 목록 — 최대 2명. 환경변수 MASTER_CHAT_ID(쉼표·공백) 우선."""
+    raw = (os.environ.get("MASTER_CHAT_ID") or "").strip()
+    if raw:
+        ids = [int(t) for t in re.split(r"[,\s]+", raw) if t.lstrip("-").isdigit()]
+        if ids:
+            return ids[:MAX_MASTERS]
+    return _read_master_file()[:MAX_MASTERS]
+
+
+def save_master_admins(ids):
+    uniq = list(dict.fromkeys(int(i) for i in ids))[:MAX_MASTERS]
+    with open(os.path.join(BASE, "master_admin.json"), "w", encoding="utf-8") as f:
+        json.dump({"chat_ids": uniq}, f)
+    return uniq
+
+
+def master_admin():
+    """대표 마스터 1인(첫 번째). 하위 호환용."""
+    ms = master_admins()
+    return ms[0] if ms else None
 
 
 def set_master_admin(chat_id):
-    with open(os.path.join(BASE, "master_admin.json"), "w", encoding="utf-8") as f:
-        json.dump({"chat_id": chat_id}, f)
+    save_master_admins([chat_id])
+
+
+def _master_env_set():
+    return bool((os.environ.get("MASTER_CHAT_ID") or "").strip())
+
+
+async def _mb_add_master(update, context, arg):
+    """기존 마스터: 번호로 공동 마스터 추가(최대 2)."""
+    admins = master_admins()
+    arg = (arg or "").strip()
+    if not arg.lstrip("-").isdigit():
+        await update.message.reply_text(
+            "추가할 분의 <b>번호</b>로 지정해 주세요. 예) <code>마스터 추가 12345678</code>\n"
+            "(상대가 이 봇에 아무 메시지나 보내면 자기 번호를 안내받아요)", parse_mode="HTML")
+        return
+    new_id = int(arg)
+    if new_id in admins:
+        await update.message.reply_text("이미 마스터예요. 👍")
+        return
+    if len(admins) >= MAX_MASTERS:
+        await update.message.reply_text(
+            f"마스터는 최대 {MAX_MASTERS}명까지예요. 먼저 <code>마스터 해제 번호</code>로 비워주세요.",
+            parse_mode="HTML")
+        return
+    save_master_admins(admins + [new_id])
+    warn = ("\n\n⚠️ <code>MASTER_CHAT_ID</code> 환경변수가 설정돼 있어 파일 지정이 안 먹을 수 있어요."
+            if _master_env_set() else "")
+    await update.message.reply_text(
+        f"👑 id {new_id} 님을 공동 마스터로 추가했어요. (현재 {len(master_admins())}/{MAX_MASTERS}명){warn}",
+        parse_mode="HTML")
+    try:
+        await context.bot.send_message(
+            new_id, "👑 <b>원장용 마스터봇</b>을 쓸 수 있게 됐어요.\n" + GUIDE, parse_mode="HTML")
+    except Exception:
+        pass
+
+
+async def _mb_remove_master(update, context, arg):
+    """기존 마스터: 공동 마스터 해제(최소 1명 유지)."""
+    admins = master_admins()
+    arg = (arg or "").strip()
+    if not arg.lstrip("-").isdigit():
+        await update.message.reply_text(
+            "뺄 분의 번호로 지정해 주세요. 예) <code>마스터 해제 12345678</code>", parse_mode="HTML")
+        return
+    tid = int(arg)
+    if tid not in admins:
+        await update.message.reply_text("그분은 마스터가 아니에요.")
+        return
+    if len(admins) <= 1:
+        await update.message.reply_text("마스터가 1명뿐이라 해제할 수 없어요. (최소 1명 필요)")
+        return
+    save_master_admins([i for i in admins if i != tid])
+    await update.message.reply_text(
+        f"✅ id {tid} 님을 마스터에서 해제했어요. (현재 {len(master_admins())}/{MAX_MASTERS}명)")
+    try:
+        await context.bot.send_message(tid, "원장용 마스터봇 권한이 해제됐어요.")
+    except Exception:
+        pass
 
 
 GUIDE = (
@@ -550,7 +637,8 @@ GUIDE = (
     "• <b>관심 학생</b> — 결석·지각·과제 미제출 두드러진 학생(과목 전체, 기간 지정 가능)\n"
     "• <b>시간표</b> / <b>수학 시간표</b> / <b>영어 시간표 월</b> — 수업 시간표\n"
     "• <b>국어 통계 이번주</b> — 출석률·결석·과제 미제출\n"
-    "• <b>영어 주간보고서</b> / <b>주간보고서</b>(세 과목 전부)\n\n"
+    "• <b>영어 주간보고서</b> / <b>주간보고서</b>(세 과목 전부)\n"
+    "• <b>마스터 추가 번호</b> / <b>마스터 해제 번호</b> — 공동 마스터(최대 2명) · <b>마스터</b>로 현황\n\n"
     "필요할 때 직접 물어보시면 돼요. (자동 전송은 꺼져 있어요)"
 )
 
@@ -598,23 +686,40 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     low = ac.normalize_grades(text.lstrip("/").strip().replace("지크", "zec"))   # 별칭·학년 정규화
 
-    admin = master_admin()
-    if low in ("관리자등록", "관리자 등록", "관리자"):
-        if admin is None:
+    admins = master_admins()
+    flat = low.replace(" ", "")
+    if flat in ("관리자등록", "관리자"):
+        if not admins:
             set_master_admin(chat_id)
-            await update.message.reply_text("✅ 원장(관리자)으로 등록됐어요.\n" + GUIDE,
+            await update.message.reply_text("✅ 원장(마스터)으로 등록됐어요.\n" + GUIDE,
                                             parse_mode="HTML")
-        elif admin == chat_id:
+        elif chat_id in admins:
             await update.message.reply_text("이미 등록돼 있어요. 👍")
         else:
-            await update.message.reply_text("이미 다른 분이 등록돼 있어요.")
+            await update.message.reply_text(
+                f"이미 마스터가 있어요. 추가되려면 기존 마스터가 "
+                f"<code>마스터 추가 {chat_id}</code> 를 보내야 해요.", parse_mode="HTML")
         return
-    if admin is not None and chat_id != admin:
-        await update.message.reply_text("이 봇은 원장 전용이에요. 🔒")
+    # 마스터 추가/해제 — 기존 마스터만
+    if chat_id in admins:
+        _m = re.match(r'^마스터\s*(?:추가|지정|임명)\s*(.*)$', low)
+        if _m:
+            return await _mb_add_master(update, context, _m.group(1))
+        _m = re.match(r'^마스터\s*(?:해제|제외|빼기|내리기)\s*(.*)$', low)
+        if _m:
+            return await _mb_remove_master(update, context, _m.group(1))
+    if admins and chat_id not in admins:
+        await update.message.reply_text(
+            f"이 봇은 원장 전용이에요. 🔒\n(내 번호: <code>{chat_id}</code> — 원장님께 "
+            f"<code>마스터 추가 {chat_id}</code> 요청)", parse_mode="HTML")
         return
-    if admin is None:
+    if not admins:
         await update.message.reply_text("먼저 <b>관리자 등록</b> 을 보내 원장으로 등록해 주세요.",
                                         parse_mode="HTML")
+        return
+    if flat in ("마스터", "마스터현황"):
+        who = " · ".join(f"id {c}" for c in admins)
+        await update.message.reply_text(f"👑 마스터({len(admins)}/{MAX_MASTERS}): {who}")
         return
 
     today = datetime.datetime.now(KST).date()
@@ -739,8 +844,8 @@ _last = {"daily": None, "weekly": None, "concern": None}
 
 
 async def tick(context: ContextTypes.DEFAULT_TYPE):
-    admin = master_admin()
-    if admin is None:
+    admins = master_admins()
+    if not admins:
         return
     now = datetime.datetime.now(KST)
     dkey = now.date().isoformat()
@@ -748,11 +853,12 @@ async def tick(context: ContextTypes.DEFAULT_TYPE):
     if (WEEKLY_CONCERN and now.weekday() == 6 and now.hour == 18
             and now.minute < 3 and _last["concern"] != dkey):
         _last["concern"] = dkey
-        try:
-            await send_long(context.bot, admin,
-                            concern_students("이번주", now.date()), parse_mode="HTML")
-        except Exception as e:
-            log.warning("주간 관심학생 실패: %s", e)
+        body = concern_students("이번주", now.date())
+        for admin in admins:
+            try:
+                await send_long(context.bot, admin, body, parse_mode="HTML")
+            except Exception as e:
+                log.warning("주간 관심학생 실패: %s", e)
     if not AUTO_SEND:
         return
     hhmm = os.environ.get("MASTER_DAILY_HHMM", "21:30")
@@ -764,18 +870,22 @@ async def tick(context: ContextTypes.DEFAULT_TYPE):
     dkey = now.date().isoformat()
     if now.hour == dh and dm <= now.minute < dm + 3 and _last["daily"] != dkey:
         _last["daily"] = dkey
-        try:
-            await send_long(context.bot, admin, build_status(now.date()), parse_mode="HTML")
-        except Exception as e:
-            log.warning("일일 요약 실패: %s", e)
+        body = build_status(now.date())
+        for admin in admins:
+            try:
+                await send_long(context.bot, admin, body, parse_mode="HTML")
+            except Exception as e:
+                log.warning("일일 요약 실패: %s", e)
     # 일요일 20:00 주간보고서
     if now.weekday() == 6 and now.hour == 20 and now.minute < 3 and _last["weekly"] != dkey:
         _last["weekly"] = dkey
         for lb in SUBJECTS:
             try:
                 res = subject_weekly(lb, now.date())
-                if res:
-                    out, n = res
+                if not res:
+                    continue
+                out, n = res
+                for admin in admins:
                     with open(out, "rb") as f:
                         await context.bot.send_document(admin, document=f,
                                                         filename=os.path.basename(out),
