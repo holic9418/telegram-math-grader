@@ -1423,6 +1423,37 @@ def write_attendance(wb, sheet, date_str, data, enroll=None):
         _write_value(ws, top + ROW_OFFSET['비고'], 2, new_label.strip())
         written.append(f"비고 라벨 → {new_label.strip()}")
 
+    # 신규등록: 그 날 수업내용/다음과제를 따로 안 적었으면 반 공통값을 신규생 칸에도 채워 함께 병합
+    if newly_added:
+        def _eff_val(r, c):
+            for rng in ws.merged_cells.ranges:
+                if rng.min_row <= r <= rng.max_row and rng.min_col <= c <= rng.max_col:
+                    return ws.cell(rng.min_row, rng.min_col).value
+            return ws.cell(r, c).value
+        scols = sorted(roster.values())
+        for label in ('수업내용', '다음과제'):
+            rr = top + ROW_OFFSET[label]
+            eff = {c: _eff_val(rr, c) for c in scols}
+            others = [eff[c] for st, c in roster.items() if st not in newly_added]
+            others = [x for x in others if x not in (None, '')]
+            if not others:
+                continue                                  # 그 날 반 공통값이 없으면 그대로
+            common = max(set(others), key=others.count)   # 반 공통(최빈) 값
+            filled = False
+            for st in newly_added:
+                c = roster.get(st)
+                if c is not None and eff.get(c) in (None, ''):   # 개별 입력 있으면 존중
+                    eff[c] = common
+                    filled = True
+            if not filled:
+                continue
+            _unmerge_hrow(rr)                             # 행 펼치고
+            for c in scols:
+                cell = ws.cell(rr, c)
+                if not isinstance(cell, MergedCell):
+                    cell.value = eff.get(c)
+            _merge_runs(rr)                               # 같은 값끼리 다시 병합
+
     # 신규등록생은 맨 끝이 아니라 가나다순 위치로 삽입 (모든 기록을 마친 뒤 재배치)
     if newly_added:
         try:
