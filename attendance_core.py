@@ -758,21 +758,42 @@ def student_active(enroll, student, date_str):
 
 
 def add_student(ws, name):
-    """시트 명단 끝에 학생을 새 열로 추가(이웃 학생열 서식 복사). 반환: 새 열번호."""
+    """시트 명단 끝에 학생을 새 열로 추가(이웃 학생열 서식 복사). 반환: 새 열번호.
+    휴강/공휴일처럼 학생 영역이 병합된 블록이 있어도 안전하게 처리한다."""
     start = _find_start_row(ws)
     last_col = _last_col(ws, start)
     new_col = last_col + 1
     for r in range(1, ws.max_row + 1):
+        dst = ws.cell(r, new_col)
+        if isinstance(dst, MergedCell):          # 이미 병합에 속한 칸은 건너뜀
+            continue
         src = ws.cell(r, last_col)
         if src.has_style:
-            ws.cell(r, new_col)._style = copy(src._style)
+            dst._style = copy(src._style)
     from openpyxl.utils import get_column_letter
     sl, dl = get_column_letter(last_col), get_column_letter(new_col)
     if sl in ws.column_dimensions and ws.column_dimensions[sl].width:
         ws.column_dimensions[dl].width = ws.column_dimensions[sl].width
     for r in range(start, ws.max_row + 1):      # 기존 블록 데이터는 비움
-        ws.cell(r, new_col).value = None
-    ws.cell(start - 1, new_col).value = nfc(name)    # 헤더에 이름(NFC로 저장)
+        c = ws.cell(r, new_col)
+        if not isinstance(c, MergedCell):        # 병합(휴강 블록 등) 칸은 그대로 둔다
+            c.value = None
+    # 휴강/공휴일 블록(학생영역 전체 병합)은 새 학생 열까지 넓혀 준다
+    for rng in list(ws.merged_cells.ranges):
+        if (rng.min_row >= start and rng.max_row > rng.min_row
+                and rng.min_col == STUDENT_FIRST_COL and rng.max_col == last_col):
+            anchor = ws.cell(rng.min_row, rng.min_col).value
+            ws.unmerge_cells(str(rng))
+            ws.merge_cells(start_row=rng.min_row, start_column=rng.min_col,
+                           end_row=rng.max_row, end_column=new_col)
+            ws.cell(rng.min_row, rng.min_col).value = anchor
+    hdr = ws.cell(start - 1, new_col)                # 헤더에 이름(NFC로 저장)
+    if isinstance(hdr, MergedCell):                  # 헤더가 병합돼 있으면 풀고 쓴다
+        for rng in list(ws.merged_cells.ranges):
+            if rng.min_row <= start - 1 <= rng.max_row and rng.min_col <= new_col <= rng.max_col:
+                ws.unmerge_cells(str(rng))
+        hdr = ws.cell(start - 1, new_col)
+    hdr.value = nfc(name)
     return new_col
 
 
