@@ -922,7 +922,7 @@ GUIDE = f"""📋 <b>{SUBJ_NAME} 출석부 봇 사용법</b>
    → 개강 때 받은 수업 시간이 <b>시간표에 자동 추가</b>, 종강하면 그 주까지만 뜨고 <b>다음 주부터 빠져요</b>
    ※ 학생 한 명은 <b>신규등록</b> · <b>퇴원</b> 으로
 • <b>점검</b>: 이상한 날짜(중복·다른 달) 확인·정리
-• <b>칸 비우기</b>: <code>초5 7/15 남우현 출석 삭제</code> · <code>초5 8/5 수업내용 지워줘</code> (그 칸만 비움)
+• <b>칸 비우기</b>: <code>초5 7/15 남우현 출석 삭제</code> · <code>초5 8/5 수업내용 지워줘</code> · <code>오늘 고1 김서영 과제수행 취소</code> (그 칸만 비움 · 반은 학생으로 자동 추론)
 • <b>날짜 변경</b>: <code>고1 7/21 → 7/22</code> (그 칸의 기록은 그대로, 날짜만 바뀜)
 • <b>분반 이동</b>: <code>중3 임건 2반으로</code> (CLASS A/B=1반/2반 사이 이동, 지난 기록 그대로 따라감)
 • <b>실행취소</b>: <u>방금 입력을 잘못했을 때</u> 직전 상태로 되돌리기 (매 입력 전 자동 백업)
@@ -1500,19 +1500,7 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
     if latest is None:
         await update.message.reply_text("아직 출석부 파일이 없어요.")
         return
-    cands = _match_preview_sheet(text, latest.sheetnames)
-    if not cands:
-        await update.message.reply_text("어느 반인지 알려주세요. 예) 초5 7/15 남우현 출석 삭제")
-        return
-    if len(cands) > 1:
-        await update.message.reply_text("어느 반인지 콕 집어주세요: " + ", ".join(cands))
-        return
-    sheet = cands[0]
-    d = _resolve_preview_date(text)
-    if d is None:
-        await update.message.reply_text("어느 날짜인지 알려주세요. 예) 초5 7/15 남우현 출석 삭제")
-        return
-    date_str = f"{d.month}/{d.day}"
+    # 항목(field) 판정
     if any(k in text for k in ("다음과제", "다음숙제", "다음 숙제")):
         field = "다음과제"
     elif "수업내용" in text or "수업" in text:
@@ -1523,18 +1511,40 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
         field = "비고"
     else:
         field = "출석"
-    student = None
+    # 학생(수업내용 외) — 학생이 속한 반도 함께 얻는다
+    student, stu_sheets = None, []
     if field != "수업내용":
-        name, _sheets, amb = _find_student(text, latest)
+        name, stu_sheets, amb = _find_student(text, latest)
         if amb:
             await update.message.reply_text("여러 명이에요: " + ", ".join(amb) + " — 성까지 붙여 주세요.")
             return
-        if not name:
-            await update.message.reply_text(
-                f"어느 학생인지 알려주세요. '{sheet}' 명단의 이름을 넣어주세요.\n"
-                "(수업내용을 지우려면 '초5 8/5 수업내용 삭제')")
-            return
         student = name
+    # 반 결정: 명시된 반 우선, 없으면 학생이 속한 반으로 추론
+    cands = _match_preview_sheet(text, latest.sheetnames)
+    if len(cands) > 1:
+        await update.message.reply_text("어느 반인지 콕 집어주세요: " + ", ".join(cands))
+        return
+    if cands:
+        sheet = cands[0]
+    elif student and len(stu_sheets) == 1:
+        sheet = stu_sheets[0]                       # 반을 안 적었어도 학생으로 추론
+    elif student and len(stu_sheets) > 1:
+        await update.message.reply_text(
+            f"'{student}' 학생이 여러 반에 있어요: " + ", ".join(stu_sheets) + " — 반도 함께 알려주세요.")
+        return
+    else:
+        await update.message.reply_text("어느 반인지 알려주세요. 예) 초5 7/15 남우현 출석 삭제")
+        return
+    d = _resolve_preview_date(text)
+    if d is None:
+        await update.message.reply_text("어느 날짜인지 알려주세요. 예) 초5 7/15 남우현 출석 삭제")
+        return
+    date_str = f"{d.month}/{d.day}"
+    if field != "수업내용" and not student:
+        await update.message.reply_text(
+            f"어느 학생인지 알려주세요. '{sheet}' 명단의 이름을 넣어주세요.\n"
+            "(수업내용을 지우려면 '초5 8/5 수업내용 삭제')")
+        return
     wb, path, mo = load_wb_for_date(date_str)
     if wb is None:
         await update.message.reply_text(f"{mo}월 출석부 파일이 없어요.")
@@ -3041,9 +3051,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             and not any(k in low for k in ("수업", "숙제", "과제", "진도", "통계",
                                            "알림", "일정", "보고서", "미리보기", "날짜"))):
         return await cmd_move_group(update, context, text)
-    # ── 칸 비우기: '초5 7/15 남우현 출석 삭제' / '초5 8/5 수업내용 지워줘' ──
-    if (re.match(r'^\s*(초|중|고)\d', low) and _resolve_preview_date(low) is not None
-            and re.search(r'(삭제|지워|지우|비워|없애)\S*\s*$', low) and "휴강" not in low):
+    # ── 칸 비우기: '초5 7/15 남우현 출석 삭제' · '오늘 고1 김서영 과제수행 취소' ──
+    #   반이 맨 앞이 아니어도(오늘 …), '취소'로 끝나도 인식. 반 또는 항목이 있어야 함.
+    _clear_end = re.search(r'(삭제|지워|지우|비워|없애|취소)\S*\s*$', low)
+    _clear_ctx = re.search(r'(초|중|고)\d', low) or any(
+        k in low for k in ("출석", "과제", "숙제", "수업내용", "수업", "비고", "다음과제"))
+    if (_clear_end and _clear_ctx and _resolve_preview_date(low) is not None
+            and "휴강" not in low
+            and low not in ("실행취소", "방금취소", "되돌리기", "취소")):
         return await cmd_clear(update, context, text)
     # ── 날짜 변경: '고1 7/21 → 7/22' / '고1 7/21일 날짜 7/22로 변경' ──
     _dtoks = re.findall(r'\d{1,2}\s*[/.월]\s*\d{1,2}', text)
