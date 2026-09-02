@@ -1775,8 +1775,29 @@ async def cmd_progress_view(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     await send(cands[0])
 
 
+def _member_by_name(q):
+    """이름(공백 무시)으로 chat_id 찾기 — 멤버·관리자 중에서. 못 찾으면 None."""
+    q2 = str(q).replace(" ", "")
+    if not q2:
+        return None
+    for src in (load_members(), load_admins()):
+        for k, v in src.items():
+            nm = (v.get("name") or "").replace(" ", "")
+            if nm and nm == q2 and str(k).lstrip("-").isdigit():
+                return int(k)
+    return None
+
+
+def _member_name(cid):
+    s = str(cid)
+    return (load_members().get(s, {}).get("name")
+            or load_admins().get(s, {}).get("name")
+            or ("마스터" if is_master(cid) else s))
+
+
 async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """반별 담당 지정. 담당으로 지정된 반의 출석 알림은 그 선생님에게만 간다."""
+    """반별 담당 지정. 담당으로 지정된 반의 출석 알림은 그 선생님에게만 간다.
+    이름을 함께 적으면(마스터/관리자만) 그 선생님을 대상으로 지정·해제한다."""
     chat_id = update.effective_chat.id
     remember_chat(chat_id)
     teachers = load_teachers()
@@ -1792,6 +1813,16 @@ async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if cn and cn in _left:
             classes.append(c)
             _left = _left.replace(cn, "", 1)
+
+    # 반 이름을 뺀 나머지 글자가 남아 있으면 = 다른 선생님 이름(대상 지정). 마스터/관리자만.
+    target_id, target_name = chat_id, None
+    if _left.strip():
+        tid = _member_by_name(_left)
+        if tid is not None:
+            if tid != chat_id and not is_admin(chat_id):
+                await update.message.reply_text("다른 선생님 담당은 마스터/관리자만 바꿀 수 있어요. 🔒")
+                return
+            target_id, target_name = tid, _member_name(tid)
 
     if not context.args:  # 현재 담당 현황
         mine = sorted(c for c, ids in teachers.items() if chat_id in ids)
@@ -1811,17 +1842,23 @@ async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if unassigned:
             lines.append("\n담당 미지정(알림 안 감): " + ", ".join(unassigned))
         lines.append("\n지정) 담당 초5 중2    해제) 담당 초5 빼기    전체해제) 담당 해제")
+        if is_admin(chat_id):
+            lines.append("다른 쌤(마스터/관리자): 담당 초5 홍길동 · 담당 초5 홍길동 빼기")
         await update.message.reply_text("\n".join(lines))
         return
 
+    whose = f"{target_name} 님을 " if target_name else ""
     if remove and not classes:  # 모든 담당에서 빠지기
         for c in list(teachers):
-            if chat_id in teachers[c]:
-                teachers[c].remove(chat_id)
+            if target_id in teachers[c]:
+                teachers[c].remove(target_id)
                 if not teachers[c]:
                     teachers.pop(c)
         save_teachers(teachers)
-        await update.message.reply_text("✅ 모든 담당 반에서 빠졌어요. 이제 알림을 받지 않습니다.")
+        if target_name:
+            await update.message.reply_text(f"✅ {target_name} 님을 모든 담당 반에서 뺐어요.")
+        else:
+            await update.message.reply_text("✅ 모든 담당 반에서 빠졌어요. 이제 알림을 받지 않습니다.")
         return
 
     if not classes:   # 반을 하나도 못 알아들음
@@ -1832,24 +1869,28 @@ async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if remove:  # 특정 반 담당에서 빠지기
         for c in classes:
-            if c in teachers and chat_id in teachers[c]:
-                teachers[c].remove(chat_id)
+            if c in teachers and target_id in teachers[c]:
+                teachers[c].remove(target_id)
                 if not teachers[c]:
                     teachers.pop(c)
         save_teachers(teachers)
-        await update.message.reply_text(f"✅ {', '.join(classes)} 담당에서 빠졌어요.")
+        await update.message.reply_text(f"✅ {whose}{', '.join(classes)} 담당에서 뺐어요.")
         return
 
     for c in classes:  # 담당 지정
         ids = teachers.get(c, [])
-        if chat_id not in ids:
-            ids.append(chat_id)
+        if target_id not in ids:
+            ids.append(target_id)
         teachers[c] = ids
     save_teachers(teachers)
-    await update.message.reply_text(
-        f"✅ 이제 {', '.join(classes)} 반의 출석 알림을 받으실 거예요.\n"
-        f"(다른 반 알림은 그 반 담당 선생님에게만 갑니다.)"
-    )
+    if target_name:
+        await update.message.reply_text(
+            f"✅ {target_name} 님을 {', '.join(classes)} 반 담당으로 지정했어요.")
+    else:
+        await update.message.reply_text(
+            f"✅ 이제 {', '.join(classes)} 반의 출석 알림을 받으실 거예요.\n"
+            f"(다른 반 알림은 그 반 담당 선생님에게만 갑니다.)"
+        )
 
 
 async def require_admin(update: Update) -> bool:
