@@ -93,6 +93,8 @@ closing_flow: dict[int, str] = {}
 stray_flow: dict[int, list] = {}
 # 휴강 지정 확인 대기: {chat_id: {"date", "targets": [(sheet, top), ...]}}
 holiday_flow: dict[int, dict] = {}
+# 담당 전체 해제 확인 대기: {chat_id: True}
+teacher_wipe_flow: dict[int, bool] = {}
 # 잡담용 짧은 기억: {chat_id: [messages]}
 chat_history: dict[int, list] = {}
 
@@ -1814,6 +1816,25 @@ async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
             classes.append(c)
             _left = _left.replace(cn, "", 1)
 
+    # 담당 전체 해제 (마스터/관리자만): '담당 전체 해제' · '담당 전부 빼기' · '담당 모두 초기화'
+    joined = "".join(context.args)
+    if remove and any(w in joined for w in ("전체", "전부", "모두", "전원", "싹")):
+        if not is_admin(chat_id):
+            await update.message.reply_text("담당 전체 해제는 마스터/관리자만 할 수 있어요. 🔒")
+            return
+        assigned = {c: ids for c, ids in teachers.items() if ids}
+        if not assigned:
+            await update.message.reply_text("지금 지정된 담당이 없어요.")
+            return
+        ppl = len({i for ids in assigned.values() for i in ids})
+        teacher_wipe_flow[chat_id] = True
+        await update.message.reply_text(
+            f"⚠️ <b>이 과목의 담당을 전부 해제</b>할까요?\n"
+            f"대상: {len(assigned)}개 반 · {ppl}명\n"
+            f"해제하면 그 반들은 <b>미입력 알림이 안 가요.</b>\n\n"
+            f"맞으면 <b>확인</b>, 아니면 <b>취소</b>", parse_mode="HTML")
+        return
+
     # 반 이름을 뺀 나머지 글자가 남아 있으면 = 다른 선생님 이름(대상 지정). 마스터/관리자만.
     target_id, target_name = chat_id, None
     if _left.strip():
@@ -1891,6 +1912,21 @@ async def cmd_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ 이제 {', '.join(classes)} 반의 출석 알림을 받으실 거예요.\n"
             f"(다른 반 알림은 그 반 담당 선생님에게만 갑니다.)"
         )
+
+
+async def handle_teacher_wipe_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
+    """담당 전체 해제 확인 처리."""
+    teacher_wipe_flow.pop(update.effective_chat.id, None)
+    if not text.strip().startswith("확인"):
+        await update.message.reply_text("담당 전체 해제를 취소했어요.")
+        return
+    teachers = load_teachers()
+    n = sum(1 for ids in teachers.values() if ids)
+    save_teachers({})
+    await update.message.reply_text(
+        f"✅ 이 과목의 담당을 모두 해제했어요. ({n}개 반)\n"
+        "다시 지정하려면 <code>담당 &lt;반&gt; &lt;이름&gt;</code>. "
+        "지금은 미입력 알림이 아무에게도 가지 않아요.", parse_mode="HTML")
 
 
 async def require_admin(update: Update) -> bool:
@@ -2891,6 +2927,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await handle_stray_confirm(update, context, text)
     if chat_id in holiday_flow:
         return await handle_holiday_confirm(update, context, text)
+    if chat_id in teacher_wipe_flow:
+        return await handle_teacher_wipe_confirm(update, context, text)
 
     # 문장 전체가 딱 이 낱말일 때만 — '정리 안 한 학생…' 같은 평범한 말이
     # 점검을 띄우고 다음 메시지까지 확인 응답으로 먹는 걸 막는다.
